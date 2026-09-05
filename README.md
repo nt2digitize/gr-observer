@@ -1,0 +1,68 @@
+# GR Observer Cell
+
+MVP de observação passiva para uma conta Telegram. Ele inventaria os grupos e
+canais já acessíveis, registra permissões, regras publicadas, bots vistos,
+links e a provável origem de uma pessoa que chama no privado.
+
+## Limites deliberados
+
+- não entra em links;
+- não envia mensagens em grupos ou canais;
+- não clica em botões;
+- não lista todos os membros;
+- não testa filtros ou palavras proibidas;
+- não responde automaticamente no privado;
+- uma sugestão de resposta vira rascunho, nunca envio.
+
+Filtros secretos de bots moderadores não são visíveis pela API. O sistema só
+marca regras publicadas e evidências observadas.
+
+## Instalação
+
+1. Crie um PostgreSQL e um bot privado de controle no BotFather.
+2. Copie `.env.example` para `.env` e preencha as variáveis.
+3. Use uma `USER_SESSION_STRING` exclusiva para este serviço.
+4. Instale: `pip install -r requirements.txt`.
+5. Execute: `python app.py`.
+6. No privado do bot de controle, envie `/observador`.
+
+No Railway, use `python app.py` como comando inicial e cadastre as mesmas
+variáveis. Apenas o `ADMIN_USER_ID` consegue abrir o painel.
+
+## Fluxo de origem do PV
+
+Quando alguém responde ou menciona a conta em um grupo, a célula registra uma
+interação por sete dias. Se a mesma pessoa chamar no privado nesse período, o
+PV recebe internamente a origem provável e aparece em **Origens PV** no painel.
+Nenhuma mensagem é enviada à pessoa.
+
+## Regra obrigatória de linguagem
+
+Toda mensagem destinada a membros, leads ou contatos deve parecer conversa
+nativa de chat: frases curtas, abreviações naturais (`vc`, `q`, `pq`, `tb`,
+`tô`, `blz`) e pequenas variações de ritmo. Não usar texto formal, perfeito ou
+com cara de atendimento automático. Não exagerar nos erros nem repetir sempre
+as mesmas abreviações. Textos técnicos do painel administrativo não seguem
+essa regra.
+
+Exemplo inadequado: `Vi que você veio pelo grupo. Vou confirmar o link correto para você.`
+
+Exemplo adequado: `pera aí q vou ver o link certo p vc`
+
+## Estado e implantação
+
+O processo termina sem conectar ao Telegram se faltar qualquer credencial, e
+informa somente os nomes das variáveis ausentes. Use uma única réplica.
+Reinício automático está desativado: FloodWait exige revisão manual.
+O bot aceita /start e /observador somente no privado do ADMIN_USER_ID.
+As credenciais nunca devem ser commitadas. Cadastre-as em Variables no Railway.
+
+Limitações do MVP: trechos candidatos a regras exigem leitura humana; mídia é
+uma indicação geral, sem discriminar cada formato; prévias de links não provam
+permissão de divulgação; bots vistos não revelam sua configuração interna.
+Ainda não há análise estatística da rotina, catálogo de donos/admins,
+aprovação/ignorar links nem envio de rascunhos. Origens são apenas prováveis.
+O histórico lido é limitado a 20 mensagens por chat por varredura por padrão.
+Interações, origens e rascunhos pessoais expiram em sete dias (limpeza na varredura).
+
+Referência: https://docs.telethon.dev/en/stable/modules/custom.html
