@@ -82,3 +82,31 @@ reiniciar o serviço. A primeira instalação começa desligada. Sem
 USER_SESSION_STRING o painel funciona, mas a observação não liga.
 FloodWait pausa apenas a observação e salva a pausa; o painel segue acessível.
 Nenhum comando permite postar, entrar em grupos ou enviar mensagens pela conta.
+
+## Gerar uma sessao exclusiva no computador
+
+Instale `telethon==1.44.0` e execute `python generate_session.py` em um terminal
+interativo. O gerador usa uma StringSession vazia e pede API ID, API HASH,
+telefone, codigo de login e, quando exigida, senha de duas etapas. O codigo,
+telefone, hash e senha ficam ocultos no terminal; nao sao gravados em arquivos
+de configuracao nem incluidos no historico de comandos.
+
+Use o ID e hash do MESMO aplicativo, obtidos em API development tools de
+https://my.telegram.org/apps. Tambem pode copiar os valores reais do servico
+de origem no Railway; expressoes `${{...}}` e tokens do BotFather nao servem.
+O gerador verifica apenas o formato localmente. A validade do par depende da
+resposta do Telegram. `ApiIdInvalidError` significa que o par foi rejeitado:
+confira ambos os valores, sem repetir com as mesmas credenciais.
+
+O arquivo `radar-gr-session.txt` so e criado apos autenticar uma conta de
+usuario. Ele fica na pasta de usuario do Windows, fora do repositorio, e nao e
+sobrescrito se ja existir. Copie seu conteudo diretamente para
+`USER_SESSION_STRING` no Railway, faca deploy e use `/ligar`. O gerador nao
+roda no Railway e nao precisa permanecer aberto. A sessao e sensivel;
+`radar-gr-session*.txt` tambem foi incluido no `.gitignore` e `.dockerignore`.
+
+Erros de autenticacao terminam com mensagem curta e a conexao e encerrada em
+`finally`. Os testes locais simulam rede e autenticacao; nao validam credenciais
+reais nem fazem login.
+
+Referencia: https://docs.telethon.dev/en/stable/basic/signing-in.html

@@ -3,6 +3,7 @@
 !.env.example
 *.session
 *.session-journal
+radar-gr-session*.txt
 __pycache__/
 *.pyc
 .venv/

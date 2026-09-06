@@ -1,5 +1,6 @@
 .env
 .env.*
 *.session*
+radar-gr-session*.txt
 .git
 __pycache__
