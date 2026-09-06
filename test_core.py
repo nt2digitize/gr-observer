@@ -15,6 +15,7 @@ class FloodWaitError(Exception):
 namespace = dict(asyncio=asyncio, os=os, errors=NS(FloodWaitError=FloodWaitError),
                  log=logging.getLogger('test'), kind_of=lambda e: e.kind,
                  now=lambda: None, title_of=lambda e: e.title,
+                 URL_RE=__import__('re').compile(r'(?:https?://|t\.me/|telegram\.me/)[^\s<>]+'),
                  utils=NS(get_peer_id=lambda e: e.peer_id),
                  functions=NS(channels=NS(GetFullChannelRequest=lambda e: e)))
 cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'Observer')
@@ -78,6 +79,34 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         obj.pool = NS(execute=AsyncMock())
         await obj.save_chat(NS(id=5, peer_id=-1000000000005, title='test', kind='group'))
         self.assertEqual(obj.pool.execute.call_args.args[1], -1000000000005)
+
+    async def test_manual_group_post_becomes_postable(self):
+        obj = Observer.__new__(Observer)
+        obj.save_chat = AsyncMock()
+        event = NS(out=True, is_group=True, is_channel=False, media=None,
+                   raw_text='post manual', get_chat=AsyncMock(return_value=NS()))
+        self.assertTrue(await obj.record_manual_post(event))
+        values = obj.save_chat.call_args.kwargs
+        self.assertTrue(values['can_text'])
+        self.assertNotIn('can_links', values)
+        self.assertNotIn('can_media', values)
+
+    async def test_manual_link_post_confirms_links(self):
+        obj = Observer.__new__(Observer)
+        obj.save_chat = AsyncMock()
+        event = NS(out=True, is_group=True, is_channel=False, media=None,
+                   raw_text='veja https://example.com', get_chat=AsyncMock(return_value=NS()))
+        self.assertTrue(await obj.record_manual_post(event))
+        values = obj.save_chat.call_args.kwargs
+        self.assertTrue(values['can_links'])
+        self.assertEqual(values['risk'], 'low')
+
+    async def test_incoming_message_does_not_mark_postable(self):
+        obj = Observer.__new__(Observer)
+        obj.save_chat = AsyncMock()
+        event = NS(out=False, is_group=True, is_channel=False)
+        self.assertFalse(await obj.record_manual_post(event))
+        obj.save_chat.assert_not_awaited()
 
     def control_observer(self):
         obj = Observer.__new__(Observer)
