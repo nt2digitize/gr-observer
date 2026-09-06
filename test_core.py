@@ -15,12 +15,23 @@ class FloodWaitError(Exception):
 namespace = dict(asyncio=asyncio, os=os, errors=NS(FloodWaitError=FloodWaitError),
                  log=logging.getLogger('test'), kind_of=lambda e: e.kind,
                  now=lambda: None, title_of=lambda e: e.title,
+                 source_label=lambda title, chat_id: f'{title} ({chat_id})' if title else str(chat_id),
                  URL_RE=__import__('re').compile(r'(?:https?://|t\.me/|telegram\.me/)[^\s<>]+'),
                  utils=NS(get_peer_id=lambda e: e.peer_id),
                  functions=NS(channels=NS(GetFullChannelRequest=lambda e: e)))
 cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'Observer')
 exec(compile(ast.Module(body=[cls], type_ignores=[]), 'app.py', 'exec'), namespace)
 Observer = namespace['Observer']
+
+
+class SourceLabelTests(unittest.TestCase):
+    def test_source_has_name_and_id(self):
+        module = ast.parse(Path(__file__).with_name('app.py').read_text())
+        func = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == 'source_label')
+        scope = {}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), 'app.py', 'exec'), scope)
+        self.assertEqual(scope['source_label']('Grupo Teste', -100123), 'Grupo Teste (-100123)')
+        self.assertEqual(scope['source_label'](None, -100123), '-100123')
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
     def observer(self, permissions):
