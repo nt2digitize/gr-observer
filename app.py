@@ -286,7 +286,9 @@ class Observer:
         tasks = []
         try:
             self.user = TelegramClient(StringSession(required("USER_SESSION_STRING")), self.api_id, self.api_hash, flood_sleep_threshold=0)
-            self.user.add_event_handler(self.guarded_observe, events.NewMessage(incoming=True))
+            # Incoming messages feed the radar; outgoing messages prove that the
+            # account can post in that chat and move it to "Postáveis".
+            self.user.add_event_handler(self.guarded_observe, events.NewMessage())
             await self.user.connect()
             if not await self.user.is_user_authorized():
                 raise RuntimeError("Sessão não autorizada")
@@ -333,6 +335,21 @@ class Observer:
         finally:
             self.active_events.discard(task)
 
+    async def record_manual_post(self, event):
+        """Use a successful outgoing post as direct evidence of permission."""
+        if not (event.out and (event.is_group or event.is_channel)):
+            return False
+        entity = await event.get_chat()
+        has_media = bool(getattr(event, "media", None))
+        has_link = bool(URL_RE.search(event.raw_text or ""))
+        evidence = {"can_text": True, "last_scanned": now()}
+        if has_media:
+            evidence["can_media"] = True
+        if has_link:
+            evidence.update(can_links=True, risk="low")
+        await self.save_chat(entity, **evidence)
+        return True
+
     async def control_command(self, event):
         if not self.is_admin(event):
             return
@@ -352,6 +369,8 @@ class Observer:
     def register_handlers(self):
         self.panel.add_event_handler(self.control_command, events.NewMessage(pattern=r"^/(?:ligar|desligar|status)(?:@\w+)?$"))
         async def observe(event):
+            if await self.record_manual_post(event):
+                return
             sender = await event.get_sender()
             if event.is_group or event.is_channel:
                 entity = await event.get_chat()
@@ -407,11 +426,17 @@ class Observer:
         text = (f"🔎 OBSERVADOR\n{self.status_text()}\n\n📢 Canais: {counts['channels']}\n👥 Grupos: {counts['groups']}\n"
                 f"✅ Pode postar: {counts['postable']}\n⚠️ Incertos: {counts['uncertain']}\n"
                 f"🤖 Bots: {bots}\n🔗 Links aguardando: {links}")
-        buttons = [[Button.inline(f"📢 Canais ({counts['channels']})", b"channels"), Button.inline(f"👥 Grupos ({counts['groups']})", b"groups")],
-                   [Button.inline(f"✅ Postáveis ({counts['postable']})", b"postable"), Button.inline(f"⚠️ Incertos ({counts['uncertain']})", b"uncertain")],
-                   [Button.inline(f"🤖 Bots ({bots})", b"bots"), Button.inline(f"🔗 Links ({links})", b"links")],
-                   [Button.inline("👤 Origens PV", b"origins"), Button.inline("📝 Rascunhos", b"drafts")]]
-        buttons.append([Button.inline("Ligar", b"power:on"), Button.inline("Desligar", b"power:off")])
+        # One button per row uses the available Telegram width and keeps labels readable.
+        buttons = [[Button.inline(f"📢 Canais ({counts['channels']})", b"channels")],
+                   [Button.inline(f"👥 Grupos ({counts['groups']})", b"groups")],
+                   [Button.inline(f"✅ Postáveis ({counts['postable']})", b"postable")],
+                   [Button.inline(f"⚠️ Incertos ({counts['uncertain']})", b"uncertain")],
+                   [Button.inline(f"🤖 Bots ({bots})", b"bots")],
+                   [Button.inline(f"🔗 Links ({links})", b"links")],
+                   [Button.inline("👤 Origens PV", b"origins")],
+                   [Button.inline("📝 Rascunhos", b"drafts")],
+                   [Button.inline("▶️ Ligar observação", b"power:on")],
+                   [Button.inline("⏸️ Desligar observação", b"power:off")]]
         if isinstance(event, events.CallbackQuery.Event):
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
         else:
