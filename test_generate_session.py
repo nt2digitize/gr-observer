@@ -3,7 +3,7 @@ import contextlib
 import io
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
+from types import SimpleNamespace, ModuleType
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -43,11 +43,58 @@ class InputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(login.os.environ, {"USERPROFILE": directory}), \
              patch("builtins.input", return_value="123"), \
-             patch.object(login, "getpass", return_value="${{ref}}"), \
+             patch.object(login, "read_secret", return_value="${{ref}}"), \
              patch.object(login, "telegram_runtime") as runtime, \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(login.main(), 1)
             runtime.assert_not_called()
+
+
+class SecretInputTests(unittest.TestCase):
+    def dialog_runtime(self):
+        module = ModuleType("tkinter")
+        module.TclError = type("TclError", (Exception,), {})
+        root = Mock()
+        module.Tk = Mock(return_value=root)
+        module.simpledialog = SimpleNamespace(askstring=Mock(return_value="hidden-value"))
+        return root, module
+
+    def test_windows_uses_masked_dialog_not_console(self):
+        root, module = self.dialog_runtime()
+        with patch.object(login.sys, "platform", "win32"), \
+             patch.dict("sys.modules", {"tkinter": module}), \
+             patch.object(login, "getpass") as console, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            result = login.read_secret("API HASH")
+        self.assertEqual(result, "hidden-value")
+        self.assertEqual(module.simpledialog.askstring.call_args.kwargs["show"], "*")
+        console.assert_not_called()
+        root.destroy.assert_called_once()
+        self.assertNotIn("hidden-value", output.getvalue())
+
+    def test_cancel_closes_dialog_without_console_fallback(self):
+        root, module = self.dialog_runtime()
+        module.simpledialog.askstring.return_value = None
+        with patch.object(login.sys, "platform", "win32"), \
+             patch.dict("sys.modules", {"tkinter": module}), \
+             patch.object(login, "getpass") as console, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(EOFError):
+                login.read_secret("API HASH")
+        console.assert_not_called()
+        root.destroy.assert_called_once()
+
+    def test_non_windows_keeps_hidden_console_input(self):
+        with patch.object(login.sys, "platform", "linux"), \
+             patch.object(login, "getpass", return_value="hidden-value"):
+            self.assertEqual(login.read_secret("API HASH"), "hidden-value")
+
+    def test_failed_paste_reports_length_without_echoing_input(self):
+        with self.assertRaises(login.SetupError) as error:
+            login.validate_credentials("123", "\x16")
+        self.assertIn("recebeu 1 caracteres", str(error.exception))
+        self.assertNotIn("\x16", str(error.exception))
+
 
 
 class LoginTests(unittest.IsolatedAsyncioTestCase):
@@ -65,7 +112,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         client.send_code_request.side_effect = ERRORS.ApiIdInvalidError("sensitive-response")
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(login, "telegram_runtime", return_value=runtime), \
-             patch.object(login, "getpass") as prompt:
+             patch.object(login, "read_secret") as prompt:
             dest = Path(directory) / "session.txt"
             with self.assertRaises(login.SetupError) as result:
                 await login.generate_session(123, "a" * 32, "+12025550123", dest)
@@ -79,7 +126,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(login, "telegram_runtime", return_value=runtime), \
-             patch.object(login, "getpass", return_value="12345"), \
+             patch.object(login, "read_secret", return_value="12345"), \
              contextlib.redirect_stdout(output):
             dest = Path(directory) / "session.txt"
             await login.generate_session(123, "a" * 32, "+12025550123", dest)
@@ -92,7 +139,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         client.sign_in.side_effect = [ERRORS.SessionPasswordNeededError(), None]
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(login, "telegram_runtime", return_value=runtime), \
-             patch.object(login, "getpass", side_effect=["12345", "test-password"]):
+             patch.object(login, "read_secret", side_effect=["12345", "test-password"]):
             await login.generate_session(123, "a" * 32, "+12025550123", Path(directory) / "session.txt")
             client.sign_in.assert_awaited_with(password="test-password")
             client.disconnect.assert_awaited_once()

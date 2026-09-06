@@ -91,6 +91,13 @@ telefone, codigo de login e, quando exigida, senha de duas etapas. O codigo,
 telefone, hash e senha ficam ocultos no terminal; nao sao gravados em arquivos
 de configuracao nem incluidos no historico de comandos.
 
+No Windows, a versao 2 abre janelas de entrada com campos mascarados para hash,
+telefone, codigo e senha. Isso permite colar com Ctrl+V em uma caixa de texto
+sem depender do comportamento de `getpass` no console. Em outros sistemas,
+mantem a entrada oculta no terminal. Uma falha de formato informa apenas a
+quantidade de caracteres recebidos, nunca o conteudo. Se tkinter nao estiver
+disponivel, o gerador informa esse problema sem voltar ao campo de console.
+
 Use o ID e hash do MESMO aplicativo, obtidos em API development tools de
 https://my.telegram.org/apps. Tambem pode copiar os valores reais do servico
 de origem no Railway; expressoes `${{...}}` e tokens do BotFather nao servem.

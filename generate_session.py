@@ -12,6 +12,32 @@ class SetupError(Exception):
     """Mensagem segura para exibir ao operador, sem valores de credenciais."""
 
 
+def read_secret(prompt):
+    """Windows usa caixa de texto com colagem nativa, fora de getpass/msvcrt."""
+    if sys.platform != "win32":
+        return getpass(prompt)
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+    except ImportError:
+        raise SetupError("Este Python nao tem tkinter para abrir o campo de colagem. Informe essa mensagem; nao repita o comando antigo.") from None
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        print("Preencha o campo na janela Radar GR (Ctrl+V funciona na caixa de texto).")
+        value = simpledialog.askstring("Radar GR - login local", prompt, show="*", parent=root)
+        if value is None:
+            raise EOFError
+        return value
+    except tk.TclError:
+        raise SetupError("Nao foi possivel abrir a janela Radar GR. Informe essa mensagem; nao repita o comando antigo.") from None
+    finally:
+        if root is not None:
+            root.destroy()
+
+
 def clean_value(value):
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
@@ -29,7 +55,11 @@ def validate_credentials(raw_id, raw_hash):
     if ":" in api_hash:
         raise SetupError("Esse valor parece um token de bot. API HASH vem de API development tools, nao do BotFather.")
     if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
-        raise SetupError("API HASH precisa conter 32 caracteres hexadecimais. Copie o valor real, sem asteriscos ou espacos internos.")
+        raise SetupError(
+            f"O campo API HASH recebeu {len(api_hash)} caracteres depois de remover espacos das bordas. "
+            "Esperado: 32 caracteres (0-9 e a-f). O conteudo nao foi exibido. "
+            "O login nao foi iniciado."
+        )
     return int(api_id), api_hash.lower()
 
 
@@ -69,13 +99,13 @@ async def generate_session(api_id, api_hash, phone, destination):
     try:
         await client.connect()
         sent = await client.send_code_request(phone)
-        code = getpass("Codigo recebido no Telegram (oculto): ").strip().replace(" ", "")
+        code = read_secret("Codigo recebido no Telegram (oculto): ").strip().replace(" ", "")
         if not code:
             raise SetupError("Codigo vazio. Nenhuma sessao foi salva.")
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
         except errors.SessionPasswordNeededError:
-            password = getpass("Senha de duas etapas (oculta): ")
+            password = read_secret("Senha de duas etapas (oculta): ")
             await client.sign_in(password=password)
         me = await client.get_me()
         if me is None or getattr(me, "bot", False):
@@ -109,18 +139,18 @@ async def generate_session(api_id, api_hash, phone, destination):
 
 
 def main():
-    print("Radar GR - gerador local de sessao exclusiva")
+    print("Radar GR - gerador local de sessao exclusiva v2 (colagem em janela)")
     print("API ID e API HASH devem pertencer ao MESMO aplicativo Telegram.")
-    print("O hash, telefone, codigo e senha ficam ocultos ao digitar.")
+    print("No Windows, hash, telefone, codigo e senha sao preenchidos em janelas com campo oculto.")
     destination = Path(os.environ.get("USERPROFILE") or Path.home()) / "radar-gr-session.txt"
     try:
         if destination.exists():
             raise SetupError(f"Ja existe um arquivo em {destination}. Nao iniciei outro login.")
         raw_id = input("API ID (numero): ")
-        raw_hash = getpass("API HASH (32 caracteres, oculto): ")
+        raw_hash = read_secret("Cole o API HASH nesta caixa (32 caracteres, oculto): ")
         api_id, api_hash = validate_credentials(raw_id, raw_hash)
         print("Formato conferido. O par sera validado pelo Telegram no proximo passo.")
-        phone = validate_phone(getpass("Telefone da conta com +55 e DDD (oculto): "))
+        phone = validate_phone(read_secret("Telefone da conta com +55 e DDD (oculto): "))
         asyncio.run(generate_session(api_id, api_hash, phone, destination))
     except SetupError as exc:
         print(f"\n{exc}")
