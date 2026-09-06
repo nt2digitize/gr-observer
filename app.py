@@ -48,6 +48,12 @@ def kind_of(entity):
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS observer_control (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  enabled BOOLEAN NOT NULL DEFAULT FALSE, reason TEXT NOT NULL DEFAULT 'Pausado',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO observer_control(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS chats (
   chat_id BIGINT PRIMARY KEY, title TEXT NOT NULL, username TEXT, kind TEXT NOT NULL,
   can_text BOOLEAN, can_media BOOLEAN, can_links BOOLEAN, slowmode_seconds INTEGER,
@@ -91,22 +97,27 @@ class Observer:
         self.db_url = required("DATABASE_URL").replace("postgres://", "postgresql://", 1)
         self.history_limit = max(0, min(50, int(os.getenv("HISTORY_LIMIT", "20"))))
         self.scan_minutes = int(os.getenv("SCAN_INTERVAL_MINUTES", "360"))
-        self.user = TelegramClient(StringSession(required("USER_SESSION_STRING")), self.api_id, self.api_hash, flood_sleep_threshold=0)
+        self.user = None
         self.panel = TelegramClient(MemorySession(), self.api_id, self.api_hash, flood_sleep_threshold=0)
         self.pool = None
         self.me = None
-        self.stop_event = asyncio.Event()
+        self.enabled = False
+        self.worker = None
+        self.control_lock = asyncio.Lock()
+        self.active_events = set()
+        self.pause_tasks = set()
+        self.state_reason = "Pausado"
 
     async def setup(self):
         self.pool = await asyncpg.create_pool(self.db_url, min_size=1, max_size=4)
         async with self.pool.acquire() as conn:
             await conn.execute(SCHEMA)
-        await self.user.connect()
-        if not await self.user.is_user_authorized():
-            raise RuntimeError("USER_SESSION_STRING não autorizada; gere uma sessão exclusiva")
-        self.me = await self.user.get_me()
         await self.panel.start(bot_token=required("CONTROL_BOT_TOKEN"))
         self.register_handlers()
+        state = await self.pool.fetchrow("SELECT enabled, reason FROM observer_control WHERE singleton=TRUE")
+        self.state_reason = state["reason"]
+        if state["enabled"]:
+            await self.set_enabled(True)
 
     async def save_chat(self, entity, **values):
         chat_id = utils.get_peer_id(entity)
@@ -234,15 +245,112 @@ class Observer:
                 row["chat_id"], sender.id,
                 USER_MESSAGE_TEMPLATES["private_link_request"], now())
 
+    def is_admin(self, event):
+        return event.sender_id == self.admin_id and event.is_private
+
+    async def set_enabled(self, enabled, reason="Pausado pelo administrador"):
+        async with self.control_lock:
+            if enabled:
+                if self.worker and not self.worker.done():
+                    return "O Radar já está ligado ou conectando."
+                if not os.getenv("USER_SESSION_STRING", "").strip():
+                    self.state_reason = "Falta configurar USER_SESSION_STRING no Railway"
+                    await self.persist_state(False, self.state_reason)
+                    return self.state_reason
+                await self.persist_state(True, "Conectando")
+                self.worker = asyncio.create_task(self.observer_worker())
+                return "Observação solicitada. Use /status para conferir."
+            # Block new events before waiting for in-flight work to stop.
+            self.enabled = False
+            try:
+                await self.persist_state(False, reason)
+            finally:
+                await self.stop_worker()
+            return "Observação desligada. O painel continua disponível."
+
+    async def persist_state(self, enabled, reason):
+        await self.pool.execute("UPDATE observer_control SET enabled=$1, reason=$2, updated_at=NOW() WHERE singleton=TRUE", enabled, reason)
+        self.state_reason = reason
+
+    async def stop_worker(self):
+        self.enabled = False
+        tasks = list(self.active_events)
+        if self.worker and self.worker is not asyncio.current_task():
+            tasks.append(self.worker)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.worker = None
+
+    async def observer_worker(self):
+        tasks = []
+        try:
+            self.user = TelegramClient(StringSession(required("USER_SESSION_STRING")), self.api_id, self.api_hash, flood_sleep_threshold=0)
+            self.user.add_event_handler(self.guarded_observe, events.NewMessage(incoming=True))
+            await self.user.connect()
+            if not await self.user.is_user_authorized():
+                raise RuntimeError("Sessão não autorizada")
+            self.me = await self.user.get_me()
+            self.enabled = True
+            self.state_reason = "Ligado"
+            tasks = [asyncio.create_task(self.scan_loop()),
+                     asyncio.create_task(self.user.run_until_disconnected())]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            raise RuntimeError("Conexão encerrada")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.enabled = False
+            reason = (f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar"
+                      if isinstance(exc, errors.FloodWaitError)
+                      else f"Observação parada: {type(exc).__name__}. Confira a sessão e a conexão.")
+            log.warning("%s", reason)
+            await self.persist_state(False, reason)
+        finally:
+            self.enabled = False
+            pending = list(self.active_events)
+            for task in tasks + pending:
+                task.cancel()
+            await asyncio.gather(*(tasks + pending), return_exceptions=True)
+            if self.user:
+                await self.user.disconnect()
+
     async def guarded_observe(self, event):
+        if not self.enabled:
+            return
+        task = asyncio.current_task()
+        self.active_events.add(task)
         try:
             await self.observe_event(event)
         except errors.FloodWaitError as exc:
-            log.error("Observação interrompida por FloodWait (%ss); revisão manual necessária", exc.seconds)
-            self.stop_event.set()
+            self.enabled = False
+            reason = f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar"
+            pause = asyncio.create_task(self.set_enabled(False, reason))
+            self.pause_tasks.add(pause)
+            pause.add_done_callback(self.pause_tasks.discard)
+        finally:
+            self.active_events.discard(task)
+
+    async def control_command(self, event):
+        if not self.is_admin(event):
+            return
+        command = event.raw_text.split("@", 1)[0].strip()
+        if command == "/ligar":
+            text = await self.set_enabled(True)
+        elif command == "/desligar":
+            text = await self.set_enabled(False)
+        else:
+            text = self.status_text()
+        await event.respond(text, parse_mode=None, link_preview=False)
+
+    def status_text(self):
+        status = "LIGADO" if self.enabled else "CONECTANDO" if self.worker and not self.worker.done() else "DESLIGADO"
+        return f"Radar: {status}\n{self.state_reason}\nPainel: online"
 
     def register_handlers(self):
-        self.user.add_event_handler(self.guarded_observe, events.NewMessage(incoming=True))
+        self.panel.add_event_handler(self.control_command, events.NewMessage(pattern=r"^/(?:ligar|desligar|status)(?:@\w+)?$"))
         async def observe(event):
             sender = await event.get_sender()
             if event.is_group or event.is_channel:
@@ -263,15 +371,19 @@ class Observer:
 
         @self.panel.on(events.NewMessage(pattern=r"^/(?:start|observador)(?:@\w+)?$"))
         async def dashboard(event):
-            if event.sender_id != self.admin_id or not event.is_private:
+            if not self.is_admin(event):
                 return
             await self.show_dashboard(event)
 
         @self.panel.on(events.CallbackQuery)
         async def callback(event):
-            if event.sender_id != self.admin_id or not event.is_private:
+            if not self.is_admin(event):
                 return await event.answer("Sem autorização", alert=True)
             data = event.data.decode()
+            if data in {"power:on", "power:off"}:
+                result = await self.set_enabled(data == "power:on")
+                await event.answer(result[:200], alert=True)
+                return await self.show_dashboard(event)
             if data == "home":
                 return await self.show_dashboard(event)
             if data in {"groups", "channels", "postable", "uncertain", "bots", "links", "origins", "drafts"}:
@@ -292,13 +404,14 @@ class Observer:
           FROM chats""")
         bots = await self.pool.fetchval("SELECT COUNT(DISTINCT bot_id) FROM observed_bots")
         links = await self.pool.fetchval("SELECT COUNT(*) FROM discovered_links WHERE status='pending'")
-        text = (f"🔎 OBSERVADOR\n\n📢 Canais: {counts['channels']}\n👥 Grupos: {counts['groups']}\n"
+        text = (f"🔎 OBSERVADOR\n{self.status_text()}\n\n📢 Canais: {counts['channels']}\n👥 Grupos: {counts['groups']}\n"
                 f"✅ Pode postar: {counts['postable']}\n⚠️ Incertos: {counts['uncertain']}\n"
                 f"🤖 Bots: {bots}\n🔗 Links aguardando: {links}")
         buttons = [[Button.inline(f"📢 Canais ({counts['channels']})", b"channels"), Button.inline(f"👥 Grupos ({counts['groups']})", b"groups")],
                    [Button.inline(f"✅ Postáveis ({counts['postable']})", b"postable"), Button.inline(f"⚠️ Incertos ({counts['uncertain']})", b"uncertain")],
                    [Button.inline(f"🤖 Bots ({bots})", b"bots"), Button.inline(f"🔗 Links ({links})", b"links")],
                    [Button.inline("👤 Origens PV", b"origins"), Button.inline("📝 Rascunhos", b"drafts")]]
+        buttons.append([Button.inline("Ligar", b"power:on"), Button.inline("Desligar", b"power:off")])
         if isinstance(event, events.CallbackQuery.Event):
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
         else:
@@ -354,33 +467,25 @@ class Observer:
         await event.edit(text[:3800], buttons=buttons, parse_mode=None, link_preview=False)
 
     async def run(self):
-        tasks = []
         try:
             await self.setup()
-            tasks = [asyncio.create_task(self.scan_loop()),
-                     asyncio.create_task(self.user.run_until_disconnected()),
-                     asyncio.create_task(self.panel.run_until_disconnected()),
-                     asyncio.create_task(self.stop_event.wait())]
-            log.info("Observer ativo; painel privado pronto")
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-        except errors.FloodWaitError as exc:
-            log.error("Observação interrompida por FloodWait (%ss); revisão manual necessária", exc.seconds)
+            log.info("Painel Radar GR online; %s", self.state_reason)
+            await self.panel.run_until_disconnected()
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.gather(self.user.disconnect(), self.panel.disconnect(), return_exceptions=True)
+            # Shutdown preserves the administrator's last saved preference.
+            await self.stop_worker()
+            if self.pause_tasks:
+                await asyncio.gather(*list(self.pause_tasks), return_exceptions=True)
+            await self.panel.disconnect()
             if self.pool:
                 await self.pool.close()
 
 
 if __name__ == "__main__":
-    names = ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "USER_SESSION_STRING",
+    names = ("TELEGRAM_API_ID", "TELEGRAM_API_HASH",
              "CONTROL_BOT_TOKEN", "ADMIN_USER_ID", "DATABASE_URL")
     missing = [name for name in names if not os.getenv(name, "").strip()]
     if missing:
-        log.error("Configuração pendente: %s. Observador não iniciado.", ", ".join(missing))
+        log.error("Configuração pendente: %s. Painel não iniciado.", ", ".join(missing))
         raise SystemExit(0)
     asyncio.run(Observer().run())

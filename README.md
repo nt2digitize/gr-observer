@@ -51,8 +51,9 @@ Exemplo adequado: `pera aí q vou ver o link certo p vc`
 
 ## Estado e implantação
 
-O processo termina sem conectar ao Telegram se faltar qualquer credencial, e
-informa somente os nomes das variáveis ausentes. Use uma única réplica.
+O painel inicia sem a sessão do observador; /ligar informa quando ela falta.
+Se faltar uma credencial do próprio painel, o processo termina e informa
+somente os nomes das variáveis ausentes. Use uma única réplica.
 Reinício automático está desativado: FloodWait exige revisão manual.
 O bot aceita /start e /observador somente no privado do ADMIN_USER_ID.
 As credenciais nunca devem ser commitadas. Cadastre-as em Variables no Railway.
@@ -66,3 +67,18 @@ O histórico lido é limitado a 20 mensagens por chat por varredura por padrão.
 Interações, origens e rascunhos pessoais expiram em sete dias (limpeza na varredura).
 
 Referência: https://docs.telethon.dev/en/stable/modules/custom.html
+
+## Controle administrativo
+
+No privado do bot, somente o ADMIN_USER_ID pode executar:
+
+- `/ligar`: conecta a conta observadora e inicia a leitura.
+- `/desligar`: cancela a leitura e desconecta a conta observadora; mantém o painel online.
+- `/status`: informa o estado real e o motivo de uma pausa.
+- `/start` ou `/observador`: abre o painel com botões Ligar/Desligar.
+
+O estado fica na tabela observer_control do PostgreSQL e é restaurado após
+reiniciar o serviço. A primeira instalação começa desligada. Sem
+USER_SESSION_STRING o painel funciona, mas a observação não liga.
+FloodWait pausa apenas a observação e salva a pausa; o painel segue acessível.
+Nenhum comando permite postar, entrar em grupos ou enviar mensagens pela conta.
