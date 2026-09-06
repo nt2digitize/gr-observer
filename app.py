@@ -47,6 +47,10 @@ def kind_of(entity):
     return "private"
 
 
+def source_label(title, chat_id):
+    return f"{title} ({chat_id})" if title else str(chat_id)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS observer_control (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
@@ -449,11 +453,16 @@ class Observer:
             rows = await self.pool.fetch("SELECT COALESCE(username,display_name,'bot') label, COUNT(*) total FROM observed_bots GROUP BY 1 ORDER BY total DESC OFFSET $1 LIMIT $2", offset, limit)
             lines = [f"🤖 @{r['label']} — {r['total']} grupo(s)" for r in rows]
         elif section == "links":
-            rows = await self.pool.fetch("SELECT url label, chat_id total FROM discovered_links WHERE status='pending' ORDER BY observed_at DESC OFFSET $1 LIMIT $2", offset, limit)
-            lines = [f"🔗 {r['label']}\n   origem: {r['total']}" for r in rows]
+            rows = await self.pool.fetch("""SELECT l.url label, l.chat_id source_id, c.title source_title
+                FROM discovered_links l LEFT JOIN chats c ON c.chat_id=l.chat_id
+                WHERE l.status='pending' ORDER BY l.observed_at DESC OFFSET $1 LIMIT $2""", offset, limit)
+            lines = [f"🔗 {r['label']}\n   origem: {source_label(r['source_title'], r['source_id'])}" for r in rows]
         elif section == "origins":
-            rows = await self.pool.fetch("SELECT COALESCE(username,user_id::text) label, source_chat_id total FROM private_origins ORDER BY detected_at DESC OFFSET $1 LIMIT $2", offset, limit)
-            lines = [f"👤 @{r['label']} ← grupo {r['total']}" for r in rows]
+            rows = await self.pool.fetch("""SELECT COALESCE(p.username,p.user_id::text) label,
+                p.source_chat_id source_id, c.title source_title
+                FROM private_origins p LEFT JOIN chats c ON c.chat_id=p.source_chat_id
+                ORDER BY p.detected_at DESC OFFSET $1 LIMIT $2""", offset, limit)
+            lines = [f"👤 @{r['label']} ← {source_label(r['source_title'], r['source_id'])}" for r in rows]
         elif section == "drafts":
             rows = await self.pool.fetch("SELECT reason label, user_id total FROM drafts WHERE status='pending' ORDER BY created_at DESC OFFSET $1 LIMIT $2", offset, limit)
             lines = [f"📝 {r['label']} — usuário {r['total']}" for r in rows]
