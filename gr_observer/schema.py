@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS chats (
 );
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS membership_status TEXT NOT NULL DEFAULT 'joined';
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS disposition TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_history_scanned TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS group_repost_state (
+  chat_id BIGINT PRIMARY KEY,
+  template_text TEXT NOT NULL,
+  current_message_id BIGINT NOT NULL,
+  inbound_count INTEGER NOT NULL DEFAULT 0,
+  template_version INTEGER NOT NULL DEFAULT 1,
+  repost_pending BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS link_targets (
   id BIGSERIAL PRIMARY KEY,
@@ -57,6 +68,7 @@ CREATE TABLE IF NOT EXISTS link_targets (
   first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_checked TIMESTAMPTZ
 );
+ALTER TABLE link_targets ADD COLUMN IF NOT EXISTS request_needed BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS visible_rules (
   chat_id BIGINT NOT NULL,
   message_id BIGINT NOT NULL,

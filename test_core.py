@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
-from telethon import errors
+from telethon import errors, types
 
 from gr_observer.application import Observer
 from gr_observer.catalog import (
@@ -246,6 +246,30 @@ class RadarTests(unittest.IsolatedAsyncioTestCase):
             ("public", "grupo_teste"),
         )
         self.assertIsNone(telegram_link_target("https://example.com/grupo"))
+
+    async def test_private_invite_preview_classifies_group_and_approval(self):
+        pool = NS(
+            fetchrow=AsyncMock(return_value={"url": "https://t.me/+Abc_123"}),
+            execute=AsyncMock(),
+        )
+        module = RadarModule(pool, settings(), AsyncMock())
+        module.client = AsyncMock()
+        module.client.return_value = types.ChatInvite(
+            title="Grupo candidato",
+            photo=types.PhotoEmpty(id=0),
+            participants_count=10,
+            color=0,
+            channel=True,
+            megagroup=True,
+            request_needed=True,
+        )
+
+        status = await module.audit_link(9)
+
+        self.assertEqual(status, "not_joined")
+        args = pool.execute.call_args.args
+        self.assertEqual(args[4:6], ("Grupo candidato", "group"))
+        self.assertTrue(args[-1])
 
     def test_schema_has_persistent_link_organizer(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS link_targets", SCHEMA)

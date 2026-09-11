@@ -58,7 +58,10 @@ class Observer:
         self.storage = Storage(self.pool)
         await self.storage.initialize()
         self.registry.register(
-            "radar", RadarModule(self.pool, self.settings, self.pause_module)
+            "radar",
+            RadarModule(
+                self.pool, self.settings, self.pause_module, self.notify_admin
+            ),
         )
         self.registry.register(
             "pv_reply", PvReplyModule(self.storage, self.settings)
@@ -99,6 +102,11 @@ class Observer:
 
     def is_admin(self, event) -> bool:
         return bool(event.is_private and int(event.sender_id) == self.admin_id)
+
+    async def notify_admin(self, text: str) -> None:
+        await self.panel.send_message(
+            self.admin_id, text, parse_mode=None, link_preview=False
+        )
 
     async def acquire_user_session_lock(self):
         conn = await self.pool.acquire()

@@ -242,13 +242,13 @@ class ControlPanel:
             "links",
             "origins",
             "drafts",
-            "joined_postable",
-            "joined_untested",
-            "joined_readonly",
-            "missing",
-            "broken",
-            "left",
-            "discarded",
+            "posting_active",
+            "joined_pending",
+            "joined_closed",
+            "candidate_groups",
+            "candidate_channels",
+            "followed_sources",
+            "unavailable",
         }:
             await self.show_list(event, data, 0)
             return
@@ -300,34 +300,38 @@ class ControlPanel:
     async def show_organizer(self, event) -> None:
         counts = await self.app.pool.fetchrow(
             """SELECT
+               (SELECT COUNT(*) FROM group_repost_state r JOIN chats c USING(chat_id)
+                 WHERE c.membership_status='joined' AND c.disposition='active') posting_active,
+               (SELECT COUNT(*) FROM chats c WHERE c.kind='group'
+                 AND c.membership_status='joined' AND c.disposition='active'
+                 AND c.can_text IS NOT FALSE
+                 AND NOT EXISTS(SELECT 1 FROM group_repost_state r WHERE r.chat_id=c.chat_id)) joined_pending,
+               (SELECT COUNT(*) FROM chats c WHERE c.kind='group'
+                 AND c.membership_status='joined' AND c.disposition='active'
+                 AND c.can_text IS FALSE
+                 AND NOT EXISTS(SELECT 1 FROM group_repost_state r WHERE r.chat_id=c.chat_id)) joined_closed,
+               (SELECT COUNT(DISTINCT COALESCE(target_chat_id,-id)) FROM link_targets
+                 WHERE disposition='active' AND access_status='not_joined' AND kind='group') candidate_groups,
+               (SELECT COUNT(DISTINCT COALESCE(target_chat_id,-id)) FROM link_targets
+                 WHERE disposition='active' AND access_status='not_joined' AND kind='channel') candidate_channels,
                (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
-                 AND disposition='active' AND can_text IS TRUE) joined_postable,
-               (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
-                 AND disposition='active' AND can_text IS NULL) joined_untested,
-               (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
-                 AND disposition='active' AND can_text IS FALSE) joined_readonly,
+                 AND disposition='active' AND kind='channel') followed_sources,
                (SELECT COUNT(*) FROM link_targets WHERE disposition='active'
-                 AND access_status='not_joined') missing,
-               (SELECT COUNT(*) FROM link_targets WHERE disposition='active'
-                 AND access_status IN ('invalid','inaccessible')) broken,
-               (SELECT COUNT(*) FROM chats WHERE disposition='active'
-                 AND membership_status='left') left_total,
-               ((SELECT COUNT(*) FROM chats WHERE disposition='discarded')+
-                (SELECT COUNT(*) FROM link_targets WHERE disposition='discarded')) discarded"""
+                 AND access_status IN ('invalid','inaccessible')) unavailable"""
         )
         buttons = [
-            [Button.inline(f"✅ Dentro e pode postar ({counts['joined_postable']})", b"list:joined_postable:0")],
-            [Button.inline(f"👀 Dentro, não testado ({counts['joined_untested']})", b"list:joined_untested:0")],
-            [Button.inline(f"🚫 Dentro, somente leitura ({counts['joined_readonly']})", b"list:joined_readonly:0")],
-            [Button.inline(f"➕ Falta entrar ({counts['missing']})", b"list:missing:0")],
-            [Button.inline(f"❌ Link não abre ({counts['broken']})", b"list:broken:0")],
-            [Button.inline(f"🚪 Saí/não estou mais ({counts['left_total']})", b"list:left:0")],
-            [Button.inline(f"🗑️ Não serve/descartados ({counts['discarded']})", b"list:discarded:0")],
+            [Button.inline(f"🟢 Postagens ativas ({counts['posting_active']})", b"list:posting_active:0")],
+            [Button.inline(f"🟡 Entrei — falta publicar ({counts['joined_pending']})", b"list:joined_pending:0")],
+            [Button.inline(f"⏰ Fechados neste momento ({counts['joined_closed']})", b"list:joined_closed:0")],
+            [Button.inline(f"👥 Grupos para conhecer ({counts['candidate_groups']})", b"list:candidate_groups:0")],
+            [Button.inline(f"📢 Canais disponíveis ({counts['candidate_channels']})", b"list:candidate_channels:0")],
+            [Button.inline(f"📡 Canais acompanhados ({counts['followed_sources']})", b"list:followed_sources:0")],
+            [Button.inline(f"❌ Links indisponíveis ({counts['unavailable']})", b"list:unavailable:0")],
             [Button.inline("↩️ Início", b"home")],
         ]
         text = (
             "🗂 ORGANIZADOR DE GRUPOS E CANAIS\n\n"
-            "O Radar apenas verifica e organiza. Ele não entra nem publica automaticamente."
+            "A entrada é sempre manual. Grupos fechados são verificados novamente de hora em hora."
         )
         if isinstance(event, events.CallbackQuery.Event):
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
@@ -391,45 +395,72 @@ class ControlPanel:
         limit = 8
         item_buttons = []
         organizer_chat_where = {
-            "joined_postable": "membership_status='joined' AND disposition='active' AND can_text IS TRUE",
-            "joined_untested": "membership_status='joined' AND disposition='active' AND can_text IS NULL",
-            "joined_readonly": "membership_status='joined' AND disposition='active' AND can_text IS FALSE",
-            "left": "membership_status='left' AND disposition='active'",
+            "posting_active": "c.membership_status='joined' AND c.disposition='active' AND EXISTS(SELECT 1 FROM group_repost_state r WHERE r.chat_id=c.chat_id)",
+            "joined_pending": "c.kind='group' AND c.membership_status='joined' AND c.disposition='active' AND c.can_text IS NOT FALSE AND NOT EXISTS(SELECT 1 FROM group_repost_state r WHERE r.chat_id=c.chat_id)",
+            "joined_closed": "c.kind='group' AND c.membership_status='joined' AND c.disposition='active' AND c.can_text IS FALSE AND NOT EXISTS(SELECT 1 FROM group_repost_state r WHERE r.chat_id=c.chat_id)",
+            "followed_sources": "c.kind='channel' AND c.membership_status='joined' AND c.disposition='active'",
         }
         if section in organizer_chat_where:
             rows = await self.app.pool.fetch(
-                f"""SELECT chat_id,title label,can_text,kind FROM chats
+                f"""SELECT c.chat_id,c.title label,c.can_text,c.kind,
+                    (SELECT inbound_count FROM group_repost_state r
+                     WHERE r.chat_id=c.chat_id) inbound_count
+                    FROM chats c
                     WHERE {organizer_chat_where[section]}
-                    ORDER BY title OFFSET $1 LIMIT $2""",
+                    ORDER BY c.title OFFSET $1 LIMIT $2""",
                 offset,
                 limit,
             )
-            lines = [
-                f"{'✅' if row['can_text'] else '🚫' if row['can_text'] is False else '👀'} "
-                f"{row['label']} — {row['kind']}"
-                for row in rows
-            ]
+            icons = {
+                "posting_active": "🟢",
+                "joined_pending": "🟡",
+                "joined_closed": "⏰",
+                "followed_sources": "📡",
+            }
+            lines = []
+            for row in rows:
+                suffix = (
+                    f" — {int(row['inbound_count'] or 0)}/10 mensagens"
+                    if section == "posting_active"
+                    else ""
+                )
+                lines.append(f"{icons[section]} {row['label']}{suffix}")
             item_buttons = [
                 [Button.inline(row["label"][:60], f"chat:{row['chat_id']}".encode())]
                 for row in rows
             ]
-        elif section in {"missing", "broken"}:
-            condition = (
-                "access_status='not_joined'"
-                if section == "missing"
-                else "access_status IN ('invalid','inaccessible')"
-            )
+        elif section in {"candidate_groups", "candidate_channels", "unavailable"}:
+            condition = {
+                "candidate_groups": "lt.access_status='not_joined' AND lt.kind='group'",
+                "candidate_channels": "lt.access_status='not_joined' AND lt.kind='channel'",
+                "unavailable": "lt.access_status IN ('invalid','inaccessible') AND (lt.target_chat_id IS NULL OR NOT EXISTS(SELECT 1 FROM link_targets ok WHERE ok.target_chat_id=lt.target_chat_id AND ok.disposition='active' AND ok.access_status IN ('joined','not_joined')))",
+            }[section]
             rows = await self.app.pool.fetch(
-                f"""SELECT id,COALESCE(title,url) label,url,access_status
-                    FROM link_targets WHERE disposition='active' AND {condition}
-                    ORDER BY first_seen DESC OFFSET $1 LIMIT $2""",
+                f"""SELECT (ARRAY_AGG(id ORDER BY
+                           CASE access_status WHEN 'not_joined' THEN 0 ELSE 1 END,
+                           last_checked DESC NULLS LAST))[1] id,
+                    COALESCE(MAX(title),MIN(url)) label,
+                    MAX(kind) kind,MAX(access_status) access_status,
+                    BOOL_OR(request_needed) request_needed,COUNT(*) link_count
+                    FROM link_targets lt WHERE lt.disposition='active' AND {condition}
+                    GROUP BY COALESCE(lt.target_chat_id,-lt.id)
+                    ORDER BY MAX(last_checked) DESC NULLS LAST
+                    OFFSET $1 LIMIT $2""",
                 offset,
                 limit,
             )
-            lines = [
-                f"{'➕' if row['access_status']=='not_joined' else '❌'} {row['label']}"
-                for row in rows
-            ]
+            icons = {
+                "candidate_groups": "👥",
+                "candidate_channels": "📢",
+                "unavailable": "❌",
+            }
+            lines = []
+            for row in rows:
+                approval = " — precisa aprovação" if row["request_needed"] else ""
+                alternatives = (
+                    f" — {row['link_count']} links" if row["link_count"] > 1 else ""
+                )
+                lines.append(f"{icons[section]} {row['label']}{approval}{alternatives}")
             item_buttons = [
                 [Button.inline(row["label"][:60], f"link:{row['id']}".encode())]
                 for row in rows
@@ -535,13 +566,13 @@ class ControlPanel:
             )
         buttons = item_buttons + ([navigation] if navigation else [])
         organizer_sections = {
-            "joined_postable",
-            "joined_untested",
-            "joined_readonly",
-            "missing",
-            "broken",
-            "left",
-            "discarded",
+            "posting_active",
+            "joined_pending",
+            "joined_closed",
+            "candidate_groups",
+            "candidate_channels",
+            "followed_sources",
+            "unavailable",
         }
         back_target = b"organizer" if section in organizer_sections else b"home"
         buttons.append([Button.inline("↩️ Voltar", back_target)])
@@ -572,12 +603,32 @@ class ControlPanel:
                WHERE chat_id=$1 LIMIT 8""",
             chat_id,
         )
+        repost = await self.app.pool.fetchrow(
+            """SELECT template_text,inbound_count,updated_at FROM group_repost_state
+               WHERE chat_id=$1""",
+            chat_id,
+        )
+        if repost:
+            posting_status = "🟢 Postagem automática ativa"
+        elif row["kind"] == "channel":
+            posting_status = "📡 Canal acompanhado como fonte"
+        elif row["can_text"] is False:
+            posting_status = "⏰ Fechado para mensagens neste momento"
+        else:
+            posting_status = "🟡 Falta publicar o texto-modelo"
         text = (
-            f"{row['title']}\n\nSituação: {row['membership_status']}\n"
-            f"Classificação: {row['disposition']}\nTexto: {label(row['can_text'])}\n"
+            f"{row['title']}\n\n{posting_status}\n"
+            f"Participação: {row['membership_status']}\nTexto agora: {label(row['can_text'])}\n"
             f"Mídia (geral): {label(row['can_media'])}\n"
             f"Links/divulgação: {label(row['can_links'])}\n"
             f"Slow mode: {row['slowmode_seconds']} s\nÚltima consulta: {row['last_scanned']}\n\n"
+            + (
+                f"Modelo: {str(repost['template_text'])[:250]}\n"
+                f"Contador: {int(repost['inbound_count'])}/10\n\n"
+                if repost
+                else ""
+            )
+            +
             "Trechos candidatos a regras (revisar):\n"
             + "\n".join(item["excerpt"][:400] for item in rules)
             + "\n\nBots observados: "
@@ -597,18 +648,6 @@ class ControlPanel:
                     )
                 ]
             )
-        if row["disposition"] == "discarded":
-            buttons.append(
-                [Button.inline("♻️ Restaurar", f"chat:restore:{chat_id}".encode())]
-            )
-        else:
-            if row["can_text"] is not True:
-                buttons.append(
-                    [Button.inline("✅ Marcar como serve", f"chat:serve:{chat_id}".encode())]
-                )
-            buttons.append(
-                [Button.inline("🗑️ Marcar como não serve", f"chat:discard:{chat_id}".encode())]
-            )
         buttons.append([Button.inline("↩️ Organizador", b"organizer")])
         await event.edit(
             text[:3800], buttons=buttons, parse_mode=None, link_preview=False
@@ -623,14 +662,31 @@ class ControlPanel:
             return
         status_labels = {
             "joined": "✅ Já estou dentro",
-            "not_joined": "➕ Falta entrar",
+            "not_joined": "➕ Disponível para entrada manual",
             "invalid": "❌ Link inválido ou vencido",
-            "inaccessible": "⚠️ Não foi possível verificar",
+            "inaccessible": "🔒 Acesso bloqueado ou indisponível",
         }
+        if row["last_error"] == "InviteHashExpiredError":
+            status_labels["invalid"] = "⌛ Link expirado"
+        elif row["last_error"] == "InviteHashInvalidError":
+            status_labels["invalid"] = "❌ Link inválido"
+        elif row["last_error"] in {
+            "UserBannedInChannelError",
+            "ChannelPrivateError",
+        }:
+            status_labels["inaccessible"] = "🚫 Conta banida ou acesso privado"
+        alternatives = 1
+        if row["target_chat_id"] is not None:
+            alternatives = await self.app.pool.fetchval(
+                "SELECT COUNT(*) FROM link_targets WHERE target_chat_id=$1",
+                row["target_chat_id"],
+            )
+        approval = "\nEntrada: precisa de aprovação do administrador" if row["request_needed"] else ""
         text = (
             f"{row['title'] or 'Link do Telegram'}\n\n"
             f"Situação: {status_labels.get(row['access_status'], row['access_status'])}\n"
             f"Tipo: {row['kind'] or 'a confirmar'}\n"
+            f"Links conhecidos para este destino: {alternatives}{approval}\n"
             f"Última verificação: {row['last_checked'] or 'ainda não verificado'}\n"
             f"Erro: {row['last_error'] or 'nenhum'}\n\n{row['url']}"
         )
@@ -640,11 +696,11 @@ class ControlPanel:
         )
         if row["disposition"] == "discarded":
             buttons.append(
-                [Button.inline("♻️ Restaurar", f"link:restore:{link_id}".encode())]
+                [Button.inline("♻️ Voltar a mostrar", f"link:restore:{link_id}".encode())]
             )
         else:
             buttons.append(
-                [Button.inline("🗑️ Marcar como não serve", f"link:discard:{link_id}".encode())]
+                [Button.inline("🙈 Ocultar da organização", f"link:discard:{link_id}".encode())]
             )
         buttons.append([Button.inline("↩️ Organizador", b"organizer")])
         await event.edit(text[:3800], buttons=buttons, parse_mode=None, link_preview=False)

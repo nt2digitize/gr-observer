@@ -82,7 +82,7 @@ class Settings:
             user_session_string=os.getenv("USER_SESSION_STRING", "").strip(),
             history_limit=max(0, min(50, int(os.getenv("HISTORY_LIMIT", "20")))),
             scan_interval_minutes=max(
-                1, int(os.getenv("SCAN_INTERVAL_MINUTES", "360"))
+                1, int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
             ),
             pv_preview_link=os.getenv("PV_PREVIEW_LINK", "").strip(),
             pv_reply_auto_enable=env_bool("PV_REPLY_AUTO_ENABLE", False),

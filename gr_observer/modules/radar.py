@@ -40,10 +40,11 @@ def telegram_link_target(url: str) -> tuple[str, str] | None:
 class RadarModule:
     module_id = "radar"
 
-    def __init__(self, pool, settings, pause_callback):
+    def __init__(self, pool, settings, pause_callback, notify_callback=None):
         self.pool = pool
         self.settings = settings
         self.pause_callback = pause_callback
+        self.notify_callback = notify_callback
         self.client = None
         self.me = None
         self.scan_task: asyncio.Task | None = None
@@ -112,6 +113,15 @@ class RadarModule:
 
     async def inspect_permissions(self, entity) -> None:
         kind = kind_of(entity)
+        try:
+            chat_id = int(utils.get_peer_id(entity))
+        except TypeError:  # lightweight test doubles
+            chat_id = int(entity.id)
+        previous = None
+        if hasattr(self.pool, "fetchrow"):
+            previous = await self.pool.fetchrow(
+                "SELECT can_text FROM chats WHERE chat_id=$1", chat_id
+            )
         can_text = can_media = can_links = None
         slowmode = None
         try:
@@ -164,6 +174,20 @@ class RadarModule:
             risk=risk,
             last_scanned=now(),
         )
+        if (
+            kind == "group"
+            and previous
+            and previous["can_text"] is False
+            and can_text is True
+            and self.notify_callback is not None
+            and not await self.pool.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM group_repost_state WHERE chat_id=$1)",
+                chat_id,
+            )
+        ):
+            await self.notify_callback(
+                f"🟢 {title_of(entity)} abriu para mensagens agora. Entre e publique seu texto-modelo."
+            )
 
     async def inspect_history(self, entity) -> None:
         async for message in self.client.iter_messages(
@@ -213,6 +237,9 @@ class RadarModule:
             return "Radar desligado ou link não encontrado"
         url = str(row["url"])
         target = telegram_link_target(url)
+        preview_title = None
+        preview_kind = None
+        request_needed = False
         if not target:
             status, error = "invalid", "formato não reconhecido"
             entity = None
@@ -229,6 +256,16 @@ class RadarModule:
                         status, error = "joined", None
                     else:
                         status, error = "not_joined", None
+                        # A private invite preview normally exposes enough flags
+                        # to separate broadcast channels from discussion groups,
+                        # even though it does not expose a stable chat id yet.
+                        preview_title = getattr(invite, "title", None)
+                        preview_kind = (
+                            "channel" if getattr(invite, "broadcast", False) else "group"
+                        )
+                        request_needed = bool(
+                            getattr(invite, "request_needed", False)
+                        )
                 else:
                     entity = await self.client.get_entity(value)
                     status = (
@@ -242,12 +279,13 @@ class RadarModule:
             except Exception as exc:
                 status, error = "inaccessible", type(exc).__name__
         target_chat_id = utils.get_peer_id(entity) if entity is not None else None
-        title = title_of(entity) if entity is not None else None
-        target_kind = kind_of(entity) if entity is not None else None
+        title = title_of(entity) if entity is not None else preview_title
+        target_kind = kind_of(entity) if entity is not None else preview_kind
+        request_needed = False if entity is not None else request_needed
         await self.pool.execute(
             """UPDATE link_targets SET access_status=$2,target_chat_id=$3,
                title=COALESCE($4,title),kind=COALESCE($5,kind),last_error=$6,
-               last_checked=$7 WHERE id=$1""",
+               last_checked=$7,request_needed=$8 WHERE id=$1""",
             link_id,
             status,
             target_chat_id,
@@ -255,6 +293,7 @@ class RadarModule:
             target_kind,
             error,
             now(),
+            request_needed,
         )
         if entity is not None and status == "joined":
             await self.save_chat(entity)
@@ -304,7 +343,18 @@ class RadarModule:
                 seen_chat_ids.add(int(utils.get_peer_id(entity)))
                 await self.save_chat(entity)
                 await self.inspect_permissions(entity)
-                await self.inspect_history(entity)
+                history_due = await self.pool.fetchval(
+                    """SELECT last_history_scanned IS NULL OR
+                       last_history_scanned < NOW() - INTERVAL '6 hours'
+                       FROM chats WHERE chat_id=$1""",
+                    int(utils.get_peer_id(entity)),
+                )
+                if history_due:
+                    await self.inspect_history(entity)
+                    await self.pool.execute(
+                        "UPDATE chats SET last_history_scanned=NOW() WHERE chat_id=$1",
+                        int(utils.get_peer_id(entity)),
+                    )
                 await asyncio.sleep(1.2)
             except errors.FloodWaitError:
                 raise

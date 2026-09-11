@@ -119,11 +119,17 @@ O texto preservado do rascunho é: `pera aí q vou ver o link certo p vc`.
 
 ### Organizador de grupos e canais
 
-O botão `🗂 Organizar grupos/canais` separa os destinos em: dentro e pode
-postar, dentro ainda não testado, somente leitura, falta entrar, link que não
-abre, destinos dos quais a conta saiu e itens descartados. Cada detalhe permite
-abrir no Telegram, atualizar a situação, marcar como `não serve` e restaurar.
-A verificação de convite usa apenas consulta: nunca entra nem publica.
+O botão `🗂 Organizar grupos/canais` separa a operação em postagens ativas,
+grupos em que falta publicar, grupos fechados no momento, grupos disponíveis
+para entrada manual, canais disponíveis, canais acompanhados e links
+indisponíveis. A verificação de convite usa apenas consulta: nunca entra nem
+publica. Convites confirmados para o mesmo ID do Telegram aparecem como um só
+destino, mas os links alternativos continuam guardados como reserva.
+
+Permissões dos grupos são revistas de hora em hora. O histórico completo é
+relido em uma frequência menor para reduzir chamadas e risco de FloodWait. Se
+um grupo acompanhado mudar de fechado para aberto, o administrador recebe um
+aviso no Radar.
 
 No painel e no status, cada função mostra `🟢` quando ligada, `🔴` quando
 desligada e `🟡` durante a conexão.
