@@ -281,6 +281,7 @@ class RadarTests(unittest.IsolatedAsyncioTestCase):
         forbidden_attributes = {
             "send_message",
             "send_file",
+            "send_panel_text",
             "forward_messages",
             "click",
         }
@@ -294,6 +295,43 @@ class RadarTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(node.func.attr, forbidden_attributes)
             if isinstance(node, ast.Name):
                 self.assertNotIn(node.id, forbidden_names)
+
+    async def test_open_group_notice_is_persisted_in_outbox(self):
+        pool = NS(
+            fetchrow=AsyncMock(return_value={"can_text": False}),
+            fetchval=AsyncMock(return_value=False),
+            execute=AsyncMock(),
+        )
+        module = RadarModule(pool, settings(), AsyncMock())
+        module.client = AsyncMock()
+        module.client.get_permissions.return_value = NS(
+            send_messages=True, send_media=True
+        )
+        module.me = NS(id=1)
+        module.save_chat = AsyncMock()
+
+        await module.inspect_permissions(NS(id=5, title="Grupo janela", kind="group"))
+
+        calls = [call.args[0] for call in pool.execute.await_args_list]
+        self.assertTrue(any("INSERT INTO outbox_actions" in sql for sql in calls))
+
+
+class CoreNotificationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_notice_uses_effect_gateway(self):
+        observer = object.__new__(Observer)
+        observer.admin_id = 123
+        effects = NS(send_panel_text=AsyncMock(return_value={"message_id": 7}))
+        action = {
+            "action_key": "radar-open:5:hour",
+            "payload": {"text": "grupo abriu"},
+        }
+
+        result = await observer.action_notify_admin(action, effects)
+
+        self.assertEqual(result["message_id"], 7)
+        effects.send_panel_text.assert_awaited_once_with(
+            123, "grupo abriu", "radar-open:5:hour:send"
+        )
 
 
 class PvReplyTests(unittest.IsolatedAsyncioTestCase):

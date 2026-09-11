@@ -129,7 +129,8 @@ destino, mas os links alternativos continuam guardados como reserva.
 Permissões dos grupos são revistas de hora em hora. O histórico completo é
 relido em uma frequência menor para reduzir chamadas e risco de FloodWait. Se
 um grupo acompanhado mudar de fechado para aberto, o administrador recebe um
-aviso no Radar.
+aviso no Radar. Esse aviso é persistido na Outbox e entregue pelo Writer com
+chave determinística, como as demais ações ativas.
 
 No painel e no status, cada função mostra `🟢` quando ligada, `🔴` quando
 desligada e `🟡` durante a conexão.

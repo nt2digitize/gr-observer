@@ -40,10 +40,11 @@ def sent_message_id(result) -> int | None:
 class TelegramEffects:
     """The only port through which feature modules may mutate Telegram."""
 
-    def __init__(self, storage, client, action_id: int):
+    def __init__(self, storage, client, action_id: int, panel_client=None):
         self.storage = storage
         self.client = client
         self.action_id = action_id
+        self.panel_client = panel_client
 
     async def perform(
         self,
@@ -84,11 +85,25 @@ class TelegramEffects:
         return result
 
     async def send_text(self, peer, text: str, effect_key: str) -> dict[str, Any]:
+        return await self._send_text(self.client, peer, text, effect_key, "send_text")
+
+    async def send_panel_text(
+        self, peer, text: str, effect_key: str
+    ) -> dict[str, Any]:
+        if self.panel_client is None:
+            raise RuntimeError("cliente do painel indisponível")
+        return await self._send_text(
+            self.panel_client, peer, text, effect_key, "send_panel_text"
+        )
+
+    async def _send_text(
+        self, client, peer, text: str, effect_key: str, effect_type: str
+    ) -> dict[str, Any]:
         random_id = stable_random_id(effect_key)
 
         async def send():
-            input_peer = await self.client.get_input_entity(peer)
-            result = await self.client(
+            input_peer = await client.get_input_entity(peer)
+            result = await client(
                 functions.messages.SendMessageRequest(
                     peer=input_peer,
                     message=text,
@@ -100,7 +115,7 @@ class TelegramEffects:
 
         return await self.perform(
             effect_key,
-            "send_text",
+            effect_type,
             {"peer": str(peer), "text": text, "random_id": random_id},
             send,
         )
@@ -125,10 +140,11 @@ class TelegramEffects:
 class OutboxWriter:
     """Serial dispatcher. Exactly one instance accompanies the user session."""
 
-    def __init__(self, storage, client, module_enabled=None):
+    def __init__(self, storage, client, module_enabled=None, panel_client=None):
         self.storage = storage
         self.client = client
         self.module_enabled = module_enabled or (lambda _module_id: True)
+        self.panel_client = panel_client
         self.handlers: dict[tuple[str, str], Callable] = {}
         self._stopped = asyncio.Event()
 
@@ -151,7 +167,7 @@ class OutboxWriter:
                     pass
                 continue
             handler = self.handlers.get((action["module_id"], action["action_type"]))
-            if not self.module_enabled(action["module_id"]):
+            if action["module_id"] != "core" and not self.module_enabled(action["module_id"]):
                 await self.storage.fail_action(
                     action["id"],
                     RuntimeError(f"módulo desligado: {action['module_id']}"),
@@ -165,7 +181,9 @@ class OutboxWriter:
                     ),
                 )
                 continue
-            effects = TelegramEffects(self.storage, self.client, action["id"])
+            effects = TelegramEffects(
+                self.storage, self.client, action["id"], self.panel_client
+            )
             try:
                 result = await handler(action, effects)
             except asyncio.CancelledError:

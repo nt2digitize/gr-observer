@@ -7,6 +7,7 @@ no Telegram mutation port and therefore cannot send, click, join or leave.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 
@@ -40,11 +41,10 @@ def telegram_link_target(url: str) -> tuple[str, str] | None:
 class RadarModule:
     module_id = "radar"
 
-    def __init__(self, pool, settings, pause_callback, notify_callback=None):
+    def __init__(self, pool, settings, pause_callback):
         self.pool = pool
         self.settings = settings
         self.pause_callback = pause_callback
-        self.notify_callback = notify_callback
         self.client = None
         self.me = None
         self.scan_task: asyncio.Task | None = None
@@ -66,21 +66,24 @@ class RadarModule:
         self.me = None
 
     async def _guarded_scan_loop(self) -> None:
-        try:
-            await self.scan_loop()
-        except asyncio.CancelledError:
-            raise
-        except errors.FloodWaitError as exc:
-            await self.pause_callback(
-                self.module_id,
-                f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar",
-            )
-        except Exception as exc:
-            log.exception("Varredura do Radar parou")
-            await self.pause_callback(
-                self.module_id,
-                f"Observação parada: {type(exc).__name__}. Confira a sessão e a conexão.",
-            )
+        while True:
+            try:
+                await self.scan_loop()
+            except asyncio.CancelledError:
+                raise
+            except errors.FloodWaitError as exc:
+                log.warning(
+                    "Radar aguardando FloodWait por %ss; retomada automática",
+                    exc.seconds,
+                )
+                await asyncio.sleep(max(1, int(exc.seconds)) + 1)
+            except Exception as exc:
+                log.exception("Varredura do Radar parou")
+                await self.pause_callback(
+                    self.module_id,
+                    f"Observação parada: {type(exc).__name__}. Confira a sessão e a conexão.",
+                )
+                return
 
     async def save_chat(self, entity, **values) -> None:
         chat_id = utils.get_peer_id(entity)
@@ -179,14 +182,27 @@ class RadarModule:
             and previous
             and previous["can_text"] is False
             and can_text is True
-            and self.notify_callback is not None
             and not await self.pool.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM group_repost_state WHERE chat_id=$1)",
                 chat_id,
             )
         ):
-            await self.notify_callback(
-                f"🟢 {title_of(entity)} abriu para mensagens agora. Entre e publique seu texto-modelo."
+            observed = now()
+            await self.pool.execute(
+                """INSERT INTO outbox_actions(
+                       action_key,module_id,action_type,payload,available_at
+                   ) VALUES($1,'core','notify_admin',$2::jsonb,NOW())
+                   ON CONFLICT(action_key) DO NOTHING""",
+                f"radar-open:{chat_id}:{observed:%Y%m%d%H}",
+                json.dumps(
+                    {
+                        "text": (
+                            f"🟢 {title_of(entity)} abriu para mensagens agora. "
+                            "Entre e publique seu texto-modelo."
+                        )
+                    },
+                    ensure_ascii=False,
+                ),
             )
 
     async def inspect_history(self, entity) -> None:

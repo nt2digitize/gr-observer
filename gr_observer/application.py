@@ -59,9 +59,7 @@ class Observer:
         await self.storage.initialize()
         self.registry.register(
             "radar",
-            RadarModule(
-                self.pool, self.settings, self.pause_module, self.notify_admin
-            ),
+            RadarModule(self.pool, self.settings, self.pause_module),
         )
         self.registry.register(
             "pv_reply", PvReplyModule(self.storage, self.settings)
@@ -103,9 +101,11 @@ class Observer:
     def is_admin(self, event) -> bool:
         return bool(event.is_private and int(event.sender_id) == self.admin_id)
 
-    async def notify_admin(self, text: str) -> None:
-        await self.panel.send_message(
-            self.admin_id, text, parse_mode=None, link_preview=False
+    async def action_notify_admin(self, action: dict, effects) -> dict:
+        return await effects.send_panel_text(
+            self.admin_id,
+            str(action["payload"]["text"]),
+            f"{action['action_key']}:send",
         )
 
     async def acquire_user_session_lock(self):
@@ -321,8 +321,10 @@ class Observer:
             self.writer = OutboxWriter(
                 self.storage,
                 self.user,
+                panel_client=self.panel,
                 module_enabled=lambda module_id: self.registry.get(module_id).enabled,
             )
+            self.writer.register("core", "notify_admin", self.action_notify_admin)
             for item in self.registry.ordered():
                 register = getattr(item.implementation, "register_actions", None)
                 if register:
