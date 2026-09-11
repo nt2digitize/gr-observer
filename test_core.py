@@ -14,6 +14,8 @@ from gr_observer.catalog import (
     BOTSON_DETAILS,
     CAMPAIGNS,
     COMMANDS,
+    LIVE_INVITE_VARIANTS,
+    LIVE_REMARKETING_VARIANTS,
     MODULES,
     PV_GREETING_VARIANTS,
     match_command,
@@ -26,10 +28,12 @@ from gr_observer.modules.botson import BotsonModule
 from gr_observer.modules.botson_engine import button_policy, telegram_bot_from_url
 from gr_observer.modules.pv_reply import (
     PvReplyModule,
+    classify_live_response,
     classify_response,
     followup_delay_seconds,
     greeting_for,
     is_human_sender,
+    variant_for,
 )
 from gr_observer.modules.radar import RadarModule
 from gr_observer.outbox import (
@@ -262,6 +266,15 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
             mark_pv_link_sent_and_schedule=AsyncMock(return_value=True),
             complete_pv_followup_and_schedule_next=AsyncMock(return_value=True),
             complete_pv_weekly_and_schedule_next=AsyncMock(return_value=True),
+            queue_live_optin=AsyncMock(),
+            live_optin_allowed=AsyncMock(return_value=True),
+            mark_live_optin_asked=AsyncMock(),
+            live_recipient_allowed=AsyncMock(return_value=True),
+            mark_live_invite_and_schedule_remarketing=AsyncMock(),
+            mark_live_remarketing_sent=AsyncMock(),
+            close_live_recipient=AsyncMock(),
+            live_campaign_link=AsyncMock(return_value="https://example.com/live"),
+            mark_live_link_delivered=AsyncMock(),
         )
         module = PvReplyModule(storage, settings(**overrides))
         module.me = NS(id=999)
@@ -299,6 +312,13 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(classify_response("pare, não me mande mais"), "opt_out")
         self.assertEqual(classify_response("parece interessante"), "unknown")
         self.assertEqual(classify_response("uma pergunta comum"), "unknown")
+
+    def test_live_answers_are_classified_without_changing_preview_rules(self):
+        self.assertEqual(classify_live_response("quero"), "positive")
+        self.assertEqual(classify_live_response("manda o link"), "positive")
+        self.assertEqual(classify_live_response("não quero"), "negative")
+        self.assertEqual(classify_live_response("uma pergunta comum"), "unknown")
+        self.assertEqual(classify_response("quero"), "unknown")
 
     def test_progressive_delays_stay_inside_the_requested_windows(self):
         one = followup_delay_seconds(42, 1, 23, 25)
@@ -368,6 +388,7 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
             "https://t.me/+private-test-link",
         )
         sleep.assert_awaited_once_with(7)
+        storage.queue_live_optin.assert_awaited_once_with(10, 20 * 60)
         call = storage.mark_pv_link_sent_and_schedule.call_args.kwargs
         self.assertTrue(23 * 3600 <= call["delay_seconds"] <= 25 * 3600)
         self.assertEqual(call["weekly_delay_seconds"], 7 * 24 * 3600)
@@ -413,6 +434,40 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
             [call.args[1] for call in effects.send_text.await_args_list],
             ["Gostou? Já gozou pra ela??", "https://t.me/+private-test-link"],
         )
+
+    async def test_live_invite_schedules_only_one_remarketing(self):
+        module, storage = self.module()
+        effects = NS(send_text=AsyncMock(return_value={"message_id": 11}))
+        action = {
+            "action_key": "live-invite-1",
+            "payload": {"peer": 10, "campaign_id": 4},
+        }
+        result = await module.action_send_live_invite(action, effects)
+        self.assertTrue(result["sent"])
+        self.assertIn(effects.send_text.call_args.args[1], LIVE_INVITE_VARIANTS)
+        storage.mark_live_invite_and_schedule_remarketing.assert_awaited_once_with(
+            campaign_id=4, user_id=10, delay_seconds=10 * 60
+        )
+
+    async def test_live_remarketing_and_link_are_separate_actions(self):
+        module, storage = self.module()
+        effects = NS(send_text=AsyncMock(return_value={"message_id": 12}))
+        action = {
+            "action_key": "live-remarketing-1",
+            "payload": {"peer": 10, "campaign_id": 4},
+        }
+        result = await module.action_send_live_remarketing(action, effects)
+        self.assertTrue(result["sent"])
+        self.assertIn(effects.send_text.call_args.args[1], LIVE_REMARKETING_VARIANTS)
+        storage.mark_live_remarketing_sent.assert_awaited_once_with(4, 10, 10 * 60)
+
+        link_action = {
+            "action_key": "live-link-1",
+            "payload": {"peer": 10, "campaign_id": 4},
+        }
+        await module.action_send_live_link(link_action, effects)
+        self.assertEqual(effects.send_text.call_args.args[1], "https://example.com/live")
+        storage.mark_live_link_delivered.assert_awaited_once_with(4, 10)
 
 
 class OutboxTests(unittest.IsolatedAsyncioTestCase):

@@ -254,6 +254,7 @@ class Storage:
         username: str | None,
         display_name: str,
         response_kind: str,
+        live_response_kind: str,
         delay_seconds: int,
     ) -> str:
         """Advance the PV conversation and enqueue at most one delayed action.
@@ -264,6 +265,8 @@ class Storage:
         """
         if response_kind not in {"unknown", "positive", "negative", "opt_out"}:
             raise ValueError("classificação de resposta inválida")
+        if live_response_kind not in {"unknown", "positive", "negative", "opt_out"}:
+            raise ValueError("classificação de resposta de live inválida")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 inserted = await conn.fetchval(
@@ -277,6 +280,7 @@ class Storage:
                             "sender_id": user_id,
                             "message_id": message_id,
                             "response_kind": response_kind,
+                            "live_response_kind": live_response_kind,
                         }
                     ),
                 )
@@ -328,7 +332,71 @@ class Storage:
                     display_name,
                     message_id,
                 )
-                if response_kind == "opt_out":
+                active_live = await conn.fetchrow(
+                    """SELECT campaign_id,stage FROM live_campaign_recipients
+                       WHERE user_id=$1 AND stage IN ('awaiting','remarketing_sent')
+                       ORDER BY campaign_id DESC LIMIT 1 FOR UPDATE""",
+                    user_id,
+                )
+                if active_live and live_response_kind in {"positive", "negative"}:
+                    campaign_id = int(active_live["campaign_id"])
+                    if live_response_kind == "negative":
+                        await conn.execute(
+                            """UPDATE live_campaign_recipients SET stage='stopped',updated_at=NOW()
+                               WHERE campaign_id=$1 AND user_id=$2""",
+                            campaign_id,
+                            user_id,
+                        )
+                        return "live_declined"
+                    await conn.execute(
+                        """UPDATE live_campaign_recipients SET stage='link_queued',updated_at=NOW()
+                           WHERE campaign_id=$1 AND user_id=$2""",
+                        campaign_id,
+                        user_id,
+                    )
+                    await conn.execute(
+                        """INSERT INTO outbox_actions(
+                           action_key,module_id,action_type,payload)
+                           VALUES($1,'pv_reply','send_live_link',$2::jsonb)
+                           ON CONFLICT(action_key) DO NOTHING""",
+                        f"pv_reply:live-link:{campaign_id}:{user_id}",
+                        _json({"peer": user_id, "campaign_id": campaign_id}),
+                    )
+                    return "live_link_queued"
+
+                subscription = await conn.fetchval(
+                    """SELECT status FROM live_alert_subscriptions
+                       WHERE user_id=$1 FOR UPDATE""",
+                    user_id,
+                )
+                if subscription == "pending" and live_response_kind in {
+                    "positive",
+                    "negative",
+                }:
+                    status = (
+                        "subscribed" if live_response_kind == "positive" else "declined"
+                    )
+                    await conn.execute(
+                        """UPDATE live_alert_subscriptions SET status=$2,
+                           responded_at=NOW(),updated_at=NOW() WHERE user_id=$1""",
+                        user_id,
+                        status,
+                    )
+                    return f"live_{status}"
+
+                if response_kind == "opt_out" or live_response_kind == "opt_out":
+                    await conn.execute(
+                        """INSERT INTO live_alert_subscriptions(user_id,status,responded_at)
+                           VALUES($1,'unsubscribed',NOW())
+                           ON CONFLICT(user_id) DO UPDATE SET status='unsubscribed',
+                           responded_at=NOW(),updated_at=NOW()""",
+                        user_id,
+                    )
+                    await conn.execute(
+                        """UPDATE live_campaign_recipients SET stage='stopped',updated_at=NOW()
+                           WHERE user_id=$1 AND stage IN ('queued','awaiting','remarketing_sent')""",
+                        user_id,
+                    )
                     await conn.execute(
                         """UPDATE pv_reply_contacts SET stage='stopped',
                            stopped_at=NOW(),next_followup_at=NULL,updated_at=NOW()
@@ -381,6 +449,168 @@ class Storage:
                     delay_seconds,
                 )
                 return "conditional_link_queued"
+
+    async def queue_live_optin(self, user_id: int, delay_seconds: int = 1200) -> None:
+        await self.pool.execute(
+            """INSERT INTO outbox_actions(
+               action_key,module_id,action_type,payload,available_at)
+               VALUES($1,'pv_reply','send_live_optin',$2::jsonb,
+               NOW()+($3::double precision*INTERVAL '1 second'))
+               ON CONFLICT(action_key) DO NOTHING""",
+            f"pv_reply:live-optin:{user_id}",
+            _json({"peer": user_id, "campaign_id": "pv.live_optin"}),
+            delay_seconds,
+        )
+
+    async def live_optin_allowed(self, user_id: int) -> bool:
+        return not bool(
+            await self.pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM live_alert_subscriptions
+                   WHERE user_id=$1 AND status IN ('pending','subscribed','declined','unsubscribed'))""",
+                user_id,
+            )
+        )
+
+    async def mark_live_optin_asked(self, user_id: int) -> None:
+        await self.pool.execute(
+            """INSERT INTO live_alert_subscriptions(user_id,status,asked_at)
+               VALUES($1,'pending',NOW()) ON CONFLICT(user_id) DO NOTHING""",
+            user_id,
+        )
+
+    async def create_live_campaign(self, *, created_by: int, link: str) -> tuple[int, int]:
+        """Create one campaign and queue one invite per consenting contact."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                campaign_id = int(
+                    await conn.fetchval(
+                        """INSERT INTO live_campaigns(link,created_by)
+                           VALUES($1,$2) RETURNING id""",
+                        link,
+                        created_by,
+                    )
+                )
+                rows = await conn.fetch(
+                    """SELECT user_id FROM live_alert_subscriptions
+                       WHERE status='subscribed' ORDER BY user_id"""
+                )
+                for index, row in enumerate(rows):
+                    user_id = int(row["user_id"])
+                    await conn.execute(
+                        """INSERT INTO live_campaign_recipients(campaign_id,user_id)
+                           VALUES($1,$2)""",
+                        campaign_id,
+                        user_id,
+                    )
+                    await conn.execute(
+                        """INSERT INTO outbox_actions(
+                           action_key,module_id,action_type,payload,available_at)
+                           VALUES($1,'pv_reply','send_live_invite',$2::jsonb,
+                           NOW()+($3::double precision*INTERVAL '1 second'))""",
+                        f"pv_reply:live-invite:{campaign_id}:{user_id}",
+                        _json({"peer": user_id, "campaign_id": campaign_id}),
+                        index * 5,
+                    )
+                await conn.execute(
+                    "UPDATE live_campaigns SET status='sent' WHERE id=$1",
+                    campaign_id,
+                )
+                return campaign_id, len(rows)
+
+    async def live_recipient_allowed(
+        self, campaign_id: int, user_id: int, stage: str
+    ) -> bool:
+        return bool(
+            await self.pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM live_campaign_recipients
+                   WHERE campaign_id=$1 AND user_id=$2 AND stage=$3)""",
+                campaign_id,
+                user_id,
+                stage,
+            )
+        )
+
+    async def mark_live_invite_and_schedule_remarketing(
+        self, *, campaign_id: int, user_id: int, delay_seconds: int = 600
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.fetchval(
+                    """UPDATE live_campaign_recipients SET stage='awaiting',
+                       invited_at=NOW(),updated_at=NOW()
+                       WHERE campaign_id=$1 AND user_id=$2 AND stage='queued'
+                       RETURNING user_id""",
+                    campaign_id,
+                    user_id,
+                )
+                if updated is None:
+                    return
+                await conn.execute(
+                    """INSERT INTO outbox_actions(
+                       action_key,module_id,action_type,payload,available_at)
+                       VALUES($1,'pv_reply','send_live_remarketing',$2::jsonb,
+                       NOW()+($3::double precision*INTERVAL '1 second'))
+                       ON CONFLICT(action_key) DO NOTHING""",
+                    f"pv_reply:live-remarketing:{campaign_id}:{user_id}",
+                    _json({"peer": user_id, "campaign_id": campaign_id}),
+                    delay_seconds,
+                )
+
+    async def mark_live_remarketing_sent(
+        self, campaign_id: int, user_id: int, close_delay_seconds: int = 600
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.fetchval(
+                    """UPDATE live_campaign_recipients SET stage='remarketing_sent',
+                       remarketing_at=NOW(),updated_at=NOW()
+                       WHERE campaign_id=$1 AND user_id=$2 AND stage='awaiting'
+                       RETURNING user_id""",
+                    campaign_id,
+                    user_id,
+                )
+                if updated is None:
+                    return
+                await conn.execute(
+                    """INSERT INTO outbox_actions(
+                       action_key,module_id,action_type,payload,available_at)
+                       VALUES($1,'pv_reply','close_live_recipient',$2::jsonb,
+                       NOW()+($3::double precision*INTERVAL '1 second'))
+                       ON CONFLICT(action_key) DO NOTHING""",
+                    f"pv_reply:live-close:{campaign_id}:{user_id}",
+                    _json({"peer": user_id, "campaign_id": campaign_id}),
+                    close_delay_seconds,
+                )
+
+    async def close_live_recipient(self, campaign_id: int, user_id: int) -> None:
+        await self.pool.execute(
+            """UPDATE live_campaign_recipients SET stage='stopped',updated_at=NOW()
+               WHERE campaign_id=$1 AND user_id=$2 AND stage='remarketing_sent'""",
+            campaign_id,
+            user_id,
+        )
+
+    async def live_campaign_link(self, campaign_id: int) -> str | None:
+        return await self.pool.fetchval(
+            "SELECT link FROM live_campaigns WHERE id=$1", campaign_id
+        )
+
+    async def mark_live_link_delivered(self, campaign_id: int, user_id: int) -> None:
+        await self.pool.execute(
+            """UPDATE live_campaign_recipients SET stage='delivered',
+               delivered_at=NOW(),updated_at=NOW()
+               WHERE campaign_id=$1 AND user_id=$2 AND stage='link_queued'""",
+            campaign_id,
+            user_id,
+        )
+
+    async def live_subscription_counts(self) -> tuple[int, int]:
+        row = await self.pool.fetchrow(
+            """SELECT COUNT(*) FILTER(WHERE status='subscribed') subscribed,
+               COUNT(*) FILTER(WHERE status='pending') pending
+               FROM live_alert_subscriptions"""
+        )
+        return int(row["subscribed"] or 0), int(row["pending"] or 0)
 
     async def pv_action_allowed(
         self, user_id: int, stage: str, cycle: int | None = None

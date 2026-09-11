@@ -8,6 +8,8 @@ import logging
 
 from ..catalog import (
     CAMPAIGNS,
+    LIVE_INVITE_VARIANTS,
+    LIVE_REMARKETING_VARIANTS,
     PV_GREETING_VARIANTS,
     PV_RESPONSE_RULES,
     normalize_text,
@@ -15,6 +17,8 @@ from ..catalog import (
 
 log = logging.getLogger("gr-observer.pv-reply")
 LINK_BALLOON_DELAY_SECONDS = 7
+LIVE_OPTIN_DELAY_SECONDS = 20 * 60
+LIVE_REMARKETING_DELAY_SECONDS = 10 * 60
 
 
 def classify_response(text: str) -> str:
@@ -25,6 +29,19 @@ def classify_response(text: str) -> str:
         contains = tuple(normalize_text(value) for value in rule["contains"])
         if normalized in exact or any(value in normalized for value in contains):
             return response_kind
+    return "unknown"
+
+
+def classify_live_response(text: str) -> str:
+    normalized = normalize_text(text)
+    if any(value in normalized for value in ("parar", "não envie", "nao envie")):
+        return "opt_out"
+    if normalized in {"não", "nao", "não quero", "nao quero"}:
+        return "negative"
+    if normalized in {"sim", "quero", "manda", "pode", "pode mandar"}:
+        return "positive"
+    if any(value in normalized for value in ("manda o link", "quero ver")):
+        return "positive"
     return "unknown"
 
 
@@ -63,6 +80,11 @@ def greeting_for(action_key: str) -> str:
     digest = hashlib.sha256(action_key.encode()).digest()
     index = int.from_bytes(digest[:8], "big") % len(PV_GREETING_VARIANTS)
     return PV_GREETING_VARIANTS[index]
+
+
+def variant_for(action_key: str, variants: tuple[str, ...]) -> str:
+    digest = hashlib.sha256(action_key.encode()).digest()
+    return variants[int.from_bytes(digest[:8], "big") % len(variants)]
 
 
 def followup_delay_seconds(
@@ -109,6 +131,15 @@ class PvReplyModule:
         writer.register(
             self.module_id, "send_weekly_question", self.action_send_weekly_question
         )
+        writer.register(self.module_id, "send_live_optin", self.action_send_live_optin)
+        writer.register(self.module_id, "send_live_invite", self.action_send_live_invite)
+        writer.register(
+            self.module_id, "send_live_remarketing", self.action_send_live_remarketing
+        )
+        writer.register(self.module_id, "send_live_link", self.action_send_live_link)
+        writer.register(
+            self.module_id, "close_live_recipient", self.action_close_live_recipient
+        )
 
     @staticmethod
     def _event_key(event) -> str:
@@ -131,6 +162,7 @@ class PvReplyModule:
             username=getattr(sender, "username", None),
             display_name=display_name(sender),
             response_kind=classify_response(event.raw_text or ""),
+            live_response_kind=classify_live_response(event.raw_text or ""),
             delay_seconds=self.settings.pv_reply_delay_seconds,
         )
         # The Radar may still record a probable origin for this same PV. The
@@ -209,6 +241,8 @@ class PvReplyModule:
             weekly_delay_seconds=self.weekly_delay_seconds,
             max_cycles=self.settings.pv_followup_max_cycles,
         )
+        if advanced:
+            await self.storage.queue_live_optin(peer, LIVE_OPTIN_DELAY_SECONDS)
         return {"sent": True, "advanced": advanced, "invite": invite, "link": link}
 
     async def action_send_followup(self, action: dict, effects) -> dict:
@@ -300,3 +334,71 @@ class PvReplyModule:
             "reentry": reentry,
             "second_link": second_link,
         }
+
+    async def action_send_live_optin(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.live_optin_allowed(peer):
+            return {"sent": False, "reason": "already_asked"}
+        result = await effects.send_text(
+            peer,
+            self.campaign_text("pv.live_optin"),
+            f"{action['action_key']}:send",
+        )
+        await self.storage.mark_live_optin_asked(peer)
+        return {"sent": True, **result}
+
+    async def action_send_live_invite(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        if not await self.storage.live_recipient_allowed(campaign_id, peer, "queued"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(
+            peer,
+            variant_for(action["action_key"], LIVE_INVITE_VARIANTS),
+            f"{action['action_key']}:send",
+        )
+        await self.storage.mark_live_invite_and_schedule_remarketing(
+            campaign_id=campaign_id,
+            user_id=peer,
+            delay_seconds=LIVE_REMARKETING_DELAY_SECONDS,
+        )
+        return {"sent": True, **result}
+
+    async def action_send_live_remarketing(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        if not await self.storage.live_recipient_allowed(campaign_id, peer, "awaiting"):
+            return {"sent": False, "reason": "answered_or_stopped"}
+        result = await effects.send_text(
+            peer,
+            variant_for(action["action_key"], LIVE_REMARKETING_VARIANTS),
+            f"{action['action_key']}:send",
+        )
+        await self.storage.mark_live_remarketing_sent(
+            campaign_id, peer, LIVE_REMARKETING_DELAY_SECONDS
+        )
+        return {"sent": True, **result}
+
+    async def action_send_live_link(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        if not await self.storage.live_recipient_allowed(
+            campaign_id, peer, "link_queued"
+        ):
+            return {"sent": False, "reason": "state_changed"}
+        link = await self.storage.live_campaign_link(campaign_id)
+        if not link:
+            return {"sent": False, "reason": "campaign_missing"}
+        result = await effects.send_text(
+            peer,
+            link,
+            f"{action['action_key']}:send",
+        )
+        await self.storage.mark_live_link_delivered(campaign_id, peer)
+        return {"sent": True, **result}
+
+    async def action_close_live_recipient(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        await self.storage.close_live_recipient(campaign_id, peer)
+        return {"closed": True}

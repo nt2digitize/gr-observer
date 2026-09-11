@@ -185,6 +185,21 @@ pode ligar, desligar, consultar o status, conferir as mensagens do PV e iniciar
 o teste BOTSON sem digitar ou copiar comandos. Os comandos de texto permanecem
 disponíveis como alternativa.
 
+### Avisos de live com consentimento
+
+Vinte minutos depois do primeiro link de prévias, o contato recebe uma única
+pergunta autorizando avisos de live. A resposta positiva inclui o contato na
+lista; respostas negativas e pedidos para parar são respeitados e persistidos.
+Conversas que já estavam na fase ativa recebem essa pergunta uma única vez após
+a atualização.
+
+O botão `🔴 Nova live` no Radar solicita o link e mostra a quantidade de
+inscritos antes da confirmação. Cada inscrito recebe uma das cinco chamadas
+aprovadas. O link não acompanha a chamada: ele só é enviado, sozinho, depois de
+uma resposta positiva. Sem resposta, há um único remarketing após dez minutos;
+se ainda não houver resposta nos dez minutos seguintes, a campanha termina
+para aquele contato.
+
 ## Testar BOTSON
 
 A função nasce desligada. Para ligá-la, são obrigatórios:

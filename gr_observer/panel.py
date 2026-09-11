@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from telethon import Button, events
 
@@ -14,6 +15,8 @@ class ControlPanel:
     def __init__(self, application):
         self.app = application
         self.client = application.panel
+        self.awaiting_live_link = False
+        self.pending_live_link: str | None = None
 
     def register_handlers(self) -> None:
         self.client.add_event_handler(self.on_message, events.NewMessage())
@@ -21,6 +24,30 @@ class ControlPanel:
 
     async def on_message(self, event) -> None:
         if not self.app.is_admin(event):
+            return
+        if self.awaiting_live_link:
+            link = (event.raw_text or "").strip()
+            parsed = urlparse(link)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                await event.respond(
+                    "Link inválido. Envie o endereço completo começando com http:// ou https://",
+                    parse_mode=None,
+                )
+                return
+            self.awaiting_live_link = False
+            self.pending_live_link = link
+            subscribed, pending = await self.app.storage.live_subscription_counts()
+            await event.respond(
+                "🔴 CONFIRMAR AVISO DE LIVE\n\n"
+                f"Inscritos: {subscribed}\nAguardando consentimento: {pending}\n"
+                "O link só será enviado a quem responder positivamente.",
+                buttons=[
+                    [Button.inline("✅ Enviar convites", b"live:send")],
+                    [Button.inline("❌ Cancelar", b"live:cancel")],
+                ],
+                parse_mode=None,
+                link_preview=False,
+            )
             return
         command_id = match_command(event.raw_text or "", "panel")
         if command_id == "core.dashboard":
@@ -102,6 +129,43 @@ class ControlPanel:
             await event.answer()
             await self._request_botson(event)
             return
+        if data == "live:new":
+            item = self.app.registry.get("pv_reply")
+            if not item.enabled:
+                await event.answer("Ligue o Atendimento PV primeiro.", alert=True)
+                return
+            self.pending_live_link = None
+            self.awaiting_live_link = True
+            await event.answer()
+            await event.respond(
+                "🔴 NOVA LIVE\n\nEnvie agora o link completo da live.",
+                buttons=[[Button.inline("❌ Cancelar", b"live:cancel")]],
+                parse_mode=None,
+                link_preview=False,
+            )
+            return
+        if data == "live:cancel":
+            self.pending_live_link = None
+            self.awaiting_live_link = False
+            await event.answer("Campanha cancelada.", alert=True)
+            await self.show_dashboard(event)
+            return
+        if data == "live:send":
+            if not self.pending_live_link:
+                await event.answer("Link expirou. Comece uma nova live.", alert=True)
+                return
+            link, self.pending_live_link = self.pending_live_link, None
+            campaign_id, total = await self.app.storage.create_live_campaign(
+                created_by=self.app.admin_id,
+                link=link,
+            )
+            await event.answer("Campanha criada.", alert=True)
+            await event.respond(
+                f"🔴 Live #{campaign_id}: {total} convite(s) colocado(s) na fila.",
+                parse_mode=None,
+                link_preview=False,
+            )
+            return
         if data == "functions":
             await self.show_functions(event)
             return
@@ -166,6 +230,7 @@ class ControlPanel:
             [Button.inline("👤 Origens PV", b"origins")],
             [Button.inline("📝 Rascunhos", b"drafts")],
             [Button.inline("🧩 Funções", b"functions")],
+            [Button.inline("🔴 Nova live", b"live:new")],
             [Button.inline("🧪 Testar BOTSON", b"botson:run")],
             [Button.inline("▶️ Ligar observação", b"power:on")],
             [Button.inline("⏸️ Desligar observação", b"power:off")],
@@ -216,6 +281,7 @@ class ControlPanel:
         buttons += [
             [Button.inline("📊 Ver status", b"command:status")],
             [Button.inline("💬 Ver mensagens do PV", b"command:pv_preview")],
+            [Button.inline("🔴 Nova live", b"live:new")],
             [Button.inline("🧪 Executar teste BOTSON", b"botson:run")],
         ]
         buttons.append([Button.inline("↩️ Início", b"home")])

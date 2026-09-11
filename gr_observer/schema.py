@@ -148,6 +148,49 @@ CREATE TABLE IF NOT EXISTS pv_reply_contacts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Consent and per-event delivery state for administrator-triggered live alerts.
+CREATE TABLE IF NOT EXISTS live_alert_subscriptions (
+  user_id BIGINT PRIMARY KEY,
+  status TEXT NOT NULL CHECK(status IN ('pending','subscribed','declined','unsubscribed')),
+  asked_at TIMESTAMPTZ,
+  responded_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS live_campaigns (
+  id BIGSERIAL PRIMARY KEY,
+  link TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'sending'
+    CHECK(status IN ('sending','sent','cancelled')),
+  created_by BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS live_campaign_recipients (
+  campaign_id BIGINT NOT NULL REFERENCES live_campaigns(id),
+  user_id BIGINT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'queued'
+    CHECK(stage IN ('queued','awaiting','remarketing_sent','link_queued','delivered','stopped')),
+  invited_at TIMESTAMPTZ,
+  remarketing_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(campaign_id,user_id)
+);
+CREATE INDEX IF NOT EXISTS live_campaign_recipient_lookup_idx
+ON live_campaign_recipients(user_id,stage,campaign_id DESC);
+
+-- One-time backfill for conversations already inside the active PV sequence.
+INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
+SELECT 'pv_reply:live-optin:' || c.user_id,
+       'pv_reply','send_live_optin',
+       jsonb_build_object('peer',c.user_id,'campaign_id','pv.live_optin'),
+       GREATEST(NOW(),c.link_sent_at + INTERVAL '20 minutes')
+FROM pv_reply_contacts c
+LEFT JOIN live_alert_subscriptions s ON s.user_id=c.user_id
+WHERE c.stage IN ('following_up','weekly')
+  AND c.link_sent_at IS NOT NULL
+  AND s.user_id IS NULL
+ON CONFLICT(action_key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS module_runs (
   run_id TEXT PRIMARY KEY,
   module_id TEXT NOT NULL,

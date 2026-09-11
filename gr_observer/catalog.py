@@ -51,6 +51,22 @@ PV_GREETING_VARIANTS = (
     "Quer ver a minha mulher bem puta?",
 )
 
+LIVE_INVITE_VARIANTS = (
+    "Minha safada entrou ao vivo agora 😈 Quer o link?",
+    "Minha esposa tá ao vivo agora 🔥 Quer assistir?",
+    "Ela acabou de entrar ao vivo 😈 Posso mandar o link?",
+    "Minha puta esposa abriu a live agora. Quer ver?",
+    "Tem live dela rolando agora 🔥 Quer que eu mande o link?",
+)
+
+LIVE_REMARKETING_VARIANTS = (
+    "Quer gozar pra ela ao vivo na live? Posso mandar o link?",
+    "Ela ainda tá ao vivo 😈 Vai querer o link?",
+    "Ainda dá tempo de assistir minha safada ao vivo. Quer entrar?",
+    "Minha esposa ainda está na live 🔥 Posso te mandar o acesso?",
+    "Vai perder ela ao vivo? Responde “manda” que eu envio o link",
+)
+
 CAMPAIGNS = {
     "pv.greeting": {
         "order": 10,
@@ -84,6 +100,11 @@ CAMPAIGNS = {
             "Se ainda não entrou ou se saiu, entra de novo. "
             "Abre em duas telas e goza pra ela ver 😈"
         ),
+    },
+    "pv.live_optin": {
+        "order": 70,
+        "module": "pv_reply",
+        "text": "Quer que eu te avise quando ela entrar ao vivo?",
     },
 }
 
