@@ -117,6 +117,22 @@ Limites deliberados do Radar:
 Mensagens destinadas a membros devem continuar com linguagem nativa de chat.
 O texto preservado do rascunho é: `pera aí q vou ver o link certo p vc`.
 
+## Atendimento de Grupos
+
+A função nasce desligada. Os grupos em `GROUP_REPLY_ALLOWLIST` são os alvos
+iniciais. Uma postagem manual de texto bem-sucedida também autoriza o grupo
+dinamicamente e salva esse texto como modelo; uma nova postagem manual no mesmo
+grupo substitui o modelo anterior. O estado fica persistido no PostgreSQL.
+
+Em cada grupo com modelo, somente mensagens novas de outras pessoas entram na
+contagem. Após dez mensagens, a função publica o texto novamente, confirma o ID
+da nova publicação e só então apaga a cópia anterior. Mensagens automáticas da
+própria conta não entram na contagem e não substituem o modelo.
+
+Pedidos novos relacionados a esposa recebem uma das respostas curtas após
+70–90 segundos. Depois de cada resposta, o cooldown daquele grupo varia entre
+95–110 segundos. A função não pesquisa nem responde mensagens antigas.
+
 ## Atendimento PV
 
 A função nasce desligada e exige `PV_PREVIEW_LINK` no Railway. O convite

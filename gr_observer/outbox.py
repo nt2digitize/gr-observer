@@ -105,6 +105,22 @@ class TelegramEffects:
             send,
         )
 
+    async def delete_messages(
+        self, peer, message_ids: list[int], effect_key: str
+    ) -> dict[str, Any]:
+        ids = [int(message_id) for message_id in message_ids]
+
+        async def delete():
+            await self.client.delete_messages(peer, ids, revoke=True)
+            return {"deleted": True, "message_ids": ids}
+
+        return await self.perform(
+            effect_key,
+            "delete_messages",
+            {"peer": str(peer), "message_ids": ids},
+            delete,
+        )
+
 
 class OutboxWriter:
     """Serial dispatcher. Exactly one instance accompanies the user session."""
