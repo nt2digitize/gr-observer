@@ -136,6 +136,28 @@ class TelegramEffects:
             delete,
         )
 
+    async def forward_message(
+        self, source_peer, message_id: int, destination_peer, effect_key: str
+    ) -> dict[str, Any]:
+        """Forward one operator-catalogued media message through the user session."""
+        async def forward():
+            result = await self.client.forward_messages(
+                destination_peer,
+                int(message_id),
+                from_peer=source_peer,
+                drop_author=True,
+                drop_media_captions=True,
+            )
+            forwarded = result[0] if isinstance(result, (list, tuple)) and result else result
+            return {"message_id": sent_message_id(forwarded), "source_message_id": int(message_id)}
+
+        return await self.perform(
+            effect_key,
+            "forward_message",
+            {"source_peer": str(source_peer), "message_id": int(message_id), "destination_peer": str(destination_peer)},
+            forward,
+        )
+
 
 class OutboxWriter:
     """Serial dispatcher. Exactly one instance accompanies the user session."""

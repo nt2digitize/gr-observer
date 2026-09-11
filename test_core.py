@@ -30,9 +30,12 @@ from gr_observer.modules.pv_reply import (
     PvReplyModule,
     classify_live_response,
     classify_response,
+    classify_two_screens_choice,
+    classify_two_screens_response,
     followup_delay_seconds,
     greeting_for,
     is_human_sender,
+    stable_delay_seconds,
     variant_for,
 )
 from gr_observer.modules.radar import RadarModule, telegram_link_target
@@ -64,6 +67,7 @@ def settings(**overrides):
         pv_followup_max_hours=25.0,
         pv_followup_max_cycles=7,
         pv_weekly_interval_hours=168.0,
+        pv_two_screens_enabled=False,
         botson_previews=("preview",),
         botson_bot_targets=(),
         botson_controller_id=123,
@@ -353,6 +357,13 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
             close_live_recipient=AsyncMock(),
             live_campaign_link=AsyncMock(return_value="https://example.com/live"),
             mark_live_link_delivered=AsyncMock(),
+            two_screens_action_allowed=AsyncMock(return_value=True),
+            advance_two_screens=AsyncMock(return_value=True),
+            queue_next_two_screens_action=AsyncMock(return_value=True),
+            two_screens_media_slot=AsyncMock(
+                return_value={"source_peer": 123, "source_message_id": 77}
+            ),
+            mark_two_screens_photo_sent=AsyncMock(return_value=True),
         )
         module = PvReplyModule(storage, settings(**overrides))
         module.me = NS(id=999)
@@ -434,6 +445,7 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
         kwargs = storage.accept_pv_message.call_args.kwargs
         self.assertEqual(kwargs["response_kind"], "unknown")
         self.assertEqual(kwargs["delay_seconds"], 60)
+        self.assertTrue(4 <= kwargs["two_screens_photo_delay_seconds"] <= 7)
         self.assertNotIn(event.raw_text, repr(kwargs))
 
     async def test_bot_private_message_is_ignored(self):
@@ -471,6 +483,41 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(23 * 3600 <= call["delay_seconds"] <= 25 * 3600)
         self.assertEqual(call["weekly_delay_seconds"], 7 * 24 * 3600)
         self.assertEqual(call["max_cycles"], 7)
+        self.assertFalse(call["two_screens_enabled"])
+        self.assertEqual(call["two_screens_delay_seconds"], 20)
+
+    def test_two_screens_classification_is_narrow_and_slot_bound(self):
+        self.assertEqual(classify_two_screens_response("sim"), "positive")
+        self.assertEqual(classify_two_screens_response("não"), "negative")
+        self.assertEqual(classify_two_screens_response("texto qualquer"), "unknown")
+        self.assertEqual(classify_two_screens_choice("quero os peitos"), "peitos")
+        self.assertEqual(classify_two_screens_choice("buceta"), "buceta")
+        self.assertEqual(classify_two_screens_choice("no cu"), "cu")
+        self.assertIsNone(classify_two_screens_choice("manda uma"))
+        balloon = stable_delay_seconds("same", 5, 8)
+        photo = stable_delay_seconds("same", 4, 7)
+        self.assertTrue(5 <= balloon <= 8)
+        self.assertTrue(4 <= photo <= 7)
+        self.assertEqual(balloon, stable_delay_seconds("same", 5, 8))
+
+    async def test_two_screens_uses_durable_separate_balloon_actions(self):
+        module, storage = self.module()
+        effects = NS(
+            send_text=AsyncMock(return_value={"message_id": 18}),
+            forward_message=AsyncMock(return_value={"message_id": 19}),
+        )
+        question = {"action_key": "two-question", "payload": {"peer": 10}}
+        await module.action_send_two_screens_question(question, effects)
+        self.assertEqual(effects.send_text.await_args.args[1], "Prefere fazer nos peitos, na buceta ou no cu?")
+        storage.queue_next_two_screens_action.assert_awaited_once()
+        delay = storage.queue_next_two_screens_action.await_args.kwargs["delay_seconds"]
+        self.assertTrue(5 <= delay <= 8)
+
+        photo = {"action_key": "two-photo", "payload": {"peer": 10, "slot": "peitos"}}
+        result = await module.action_send_two_screens_photo(photo, effects)
+        self.assertTrue(result["sent"])
+        effects.forward_message.assert_awaited_once_with(123, 77, 10, "two-photo:send")
+        storage.mark_two_screens_photo_sent.assert_awaited_once_with(10, "peitos")
 
     async def test_weekly_sequence_uses_separate_link_balloons(self):
         module, storage = self.module()
@@ -605,6 +652,26 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             await effects.perform("key", "send", {}, operation)
         storage.review_effect.assert_awaited_once()
         storage.finish_effect.assert_not_awaited()
+
+    async def test_catalogued_photo_hides_source_and_caption(self):
+        storage = NS(
+            begin_effect=AsyncMock(return_value=("execute", None)),
+            finish_effect=AsyncMock(),
+            review_effect=AsyncMock(),
+        )
+        client = NS(forward_messages=AsyncMock(return_value=NS(id=17)))
+        effects = TelegramEffects(storage, client, 1)
+
+        result = await effects.forward_message(123, 77, 456, "photo-effect")
+
+        self.assertEqual(result["message_id"], 17)
+        client.forward_messages.assert_awaited_once_with(
+            456,
+            77,
+            from_peer=123,
+            drop_author=True,
+            drop_media_captions=True,
+        )
 
     async def test_writer_refuses_disabled_module(self):
         actions = [

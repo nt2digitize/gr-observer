@@ -55,6 +55,7 @@ class Settings:
     pv_followup_max_hours: float
     pv_followup_max_cycles: int
     pv_weekly_interval_hours: float
+    pv_two_screens_enabled: bool
     botson_previews: tuple[str, ...]
     botson_bot_targets: tuple[str, ...]
     botson_controller_id: int | None
@@ -97,6 +98,9 @@ class Settings:
             pv_weekly_interval_hours=max(
                 24.0, float(os.getenv("PV_WEEKLY_INTERVAL_HOURS", "168"))
             ),
+            # Kept opt-in so the established PV sequence is unchanged until
+            # the operator deliberately enables this extra branch.
+            pv_two_screens_enabled=env_bool("PV_TWO_SCREENS_ENABLED", False),
             botson_previews=csv_env("BOTSON_PREVIEW_ALLOWLIST"),
             botson_bot_targets=csv_env("BOTSON_BOT_TARGETS"),
             botson_controller_id=int(controller)

@@ -106,6 +106,31 @@ CAMPAIGNS = {
         "module": "pv_reply",
         "text": "Quer que eu te avise quando ela entrar ao vivo?",
     },
+    "pv.two_screens.prompt": {
+        "order": 80,
+        "module": "pv_reply",
+        "text": "Faz duas telas?",
+    },
+    "pv.two_screens.question": {
+        "order": 90,
+        "module": "pv_reply",
+        "text": "Prefere fazer nos peitos, na buceta ou no cu?",
+    },
+    "pv.two_screens.limit": {
+        "order": 100,
+        "module": "pv_reply",
+        "text": "Só pode escolher um",
+    },
+    "pv.two_screens.followup": {
+        "order": 110,
+        "module": "pv_reply",
+        "text": "Se ficar bom, depois eu mando outro",
+    },
+    "pv.two_screens.retry": {
+        "order": 120,
+        "module": "pv_reply",
+        "text": "Escolhe uma: peitos, buceta ou cu",
+    },
 }
 
 # Order matters: opt-out must win over a generic negative answer.

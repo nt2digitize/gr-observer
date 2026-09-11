@@ -183,6 +183,33 @@ CREATE TABLE IF NOT EXISTS pv_reply_contacts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Optional, independent post-link branch.  It does not alter the primary PV
+-- cadence and stores classifications only, never incoming message text.
+CREATE TABLE IF NOT EXISTS pv_two_screens_sessions (
+  user_id BIGINT PRIMARY KEY REFERENCES pv_reply_contacts(user_id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN (
+    'prompt_queued','awaiting_optin','question_queued','limit_queued',
+    'followup_queued','awaiting_choice','photo_queued','completed','stopped'
+  )),
+  selected_slot TEXT CHECK(selected_slot IN ('peitos','buceta','cu')),
+  choice_retry_sent BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+ALTER TABLE pv_two_screens_sessions
+ADD COLUMN IF NOT EXISTS choice_retry_sent BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- The control-bot chat is the operator-managed source of the current photo.
+-- Keeping a Telegram message reference permits replacing a slot without
+-- persisting files or explicit media in the database/repository.
+CREATE TABLE IF NOT EXISTS pv_two_screens_media_slots (
+  slot TEXT PRIMARY KEY CHECK(slot IN ('peitos','buceta','cu')),
+  source_peer BIGINT NOT NULL,
+  source_message_id BIGINT NOT NULL,
+  updated_by BIGINT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Consent and per-event delivery state for administrator-triggered live alerts.
 CREATE TABLE IF NOT EXISTS live_alert_subscriptions (
   user_id BIGINT PRIMARY KEY,

@@ -17,6 +17,7 @@ class ControlPanel:
         self.client = application.panel
         self.awaiting_live_link = False
         self.pending_live_link: str | None = None
+        self.awaiting_two_screens_slot: str | None = None
 
     def register_handlers(self) -> None:
         self.client.add_event_handler(self.on_message, events.NewMessage())
@@ -24,6 +25,18 @@ class ControlPanel:
 
     async def on_message(self, event) -> None:
         if not self.app.is_admin(event):
+            return
+        if self.awaiting_two_screens_slot:
+            slot = self.awaiting_two_screens_slot
+            if not getattr(event.message, "photo", None):
+                await event.respond("Envie uma foto para este espaço ou use Cancelar.", parse_mode=None)
+                return
+            self.awaiting_two_screens_slot = None
+            await self.app.storage.set_two_screens_media_slot(
+                slot=slot, source_peer=int(event.chat_id), source_message_id=int(event.id),
+                updated_by=self.app.admin_id,
+            )
+            await event.respond(f"Foto de {slot} cadastrada. A anterior, se existia, foi substituída.", parse_mode=None)
             return
         if self.awaiting_live_link:
             link = (event.raw_text or "").strip()
@@ -143,6 +156,24 @@ class ControlPanel:
                 parse_mode=None,
                 link_preview=False,
             )
+            return
+        if data == "pv:two_screens":
+            await event.answer()
+            await self.show_two_screens_media(event)
+            return
+        slot_match = re.fullmatch(r"pv:two_screens:slot:(peitos|buceta|cu)", data)
+        if slot_match:
+            self.awaiting_two_screens_slot = slot_match.group(1)
+            await event.answer()
+            await event.respond(
+                f"Envie agora a foto para: {self.awaiting_two_screens_slot}. Ela substituirá a foto anterior desse espaço.",
+                buttons=[[Button.inline("❌ Cancelar", b"pv:two_screens:cancel")]], parse_mode=None,
+            )
+            return
+        if data == "pv:two_screens:cancel":
+            self.awaiting_two_screens_slot = None
+            await event.answer("Cadastro cancelado.", alert=True)
+            await self.show_two_screens_media(event)
             return
         if data == "live:cancel":
             self.pending_live_link = None
@@ -378,6 +409,7 @@ class ControlPanel:
             [Button.inline("📊 Ver status", b"command:status")],
             [Button.inline("💬 Ver mensagens do PV", b"command:pv_preview")],
             [Button.inline("🔴 Nova live", b"live:new")],
+            [Button.inline("📷 Fotos ‘duas telas’", b"pv:two_screens")],
             [Button.inline("🧪 Executar teste BOTSON", b"botson:run")],
         ]
         buttons.append([Button.inline("↩️ Início", b"home")])
@@ -390,6 +422,26 @@ class ControlPanel:
             await event.respond(
                 text[:3900], buttons=buttons, parse_mode=None, link_preview=False
             )
+
+    async def show_two_screens_media(self, event) -> None:
+        rows = await self.app.pool.fetch("SELECT slot,updated_at FROM pv_two_screens_media_slots ORDER BY slot")
+        configured = {row["slot"] for row in rows}
+        labels = {slot: ("✅ cadastrada" if slot in configured else "⚪ falta cadastrar") for slot in ("peitos", "buceta", "cu")}
+        text = (
+            "📷 FOTOS — DUAS TELAS\n\n"
+            "Envie uma foto no privado após tocar em um espaço. Apenas a referência da mensagem é guardada; trocar substitui a anterior.\n\n"
+            + "\n".join(f"• {slot}: {labels[slot]}" for slot in ("peitos", "buceta", "cu"))
+        )
+        buttons = [
+            [Button.inline("Peitos", b"pv:two_screens:slot:peitos")],
+            [Button.inline("Buceta", b"pv:two_screens:slot:buceta")],
+            [Button.inline("Cu", b"pv:two_screens:slot:cu")],
+            [Button.inline("↩️ Funções", b"functions")],
+        ]
+        if isinstance(event, events.CallbackQuery.Event):
+            await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
+        else:
+            await event.respond(text, buttons=buttons, parse_mode=None, link_preview=False)
 
     async def show_list(self, event, section: str, offset: int) -> None:
         limit = 8

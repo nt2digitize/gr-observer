@@ -255,6 +255,9 @@ class Storage:
         display_name: str,
         response_kind: str,
         live_response_kind: str,
+        two_screens_response_kind: str,
+        two_screens_choice: str | None,
+        two_screens_photo_delay_seconds: int,
         delay_seconds: int,
     ) -> str:
         """Advance the PV conversation and enqueue at most one delayed action.
@@ -267,6 +270,10 @@ class Storage:
             raise ValueError("classificação de resposta inválida")
         if live_response_kind not in {"unknown", "positive", "negative", "opt_out"}:
             raise ValueError("classificação de resposta de live inválida")
+        if two_screens_response_kind not in {"unknown", "positive", "negative", "opt_out"}:
+            raise ValueError("classificação de duas telas inválida")
+        if two_screens_choice not in {None, "peitos", "buceta", "cu"}:
+            raise ValueError("escolha de foto inválida")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 inserted = await conn.fetchval(
@@ -281,6 +288,8 @@ class Storage:
                             "message_id": message_id,
                             "response_kind": response_kind,
                             "live_response_kind": live_response_kind,
+                            "two_screens_response_kind": two_screens_response_kind,
+                            "two_screens_choice": two_screens_choice,
                         }
                     ),
                 )
@@ -405,6 +414,70 @@ class Storage:
                     )
                     return "opted_out"
 
+                # This is an isolated post-link branch.  It consumes only the
+                # reply to its own prompt, so a simple "sim" cannot complete
+                # the established weekly/follow-up flow by accident.
+                two_screens = await conn.fetchrow(
+                    "SELECT status,choice_retry_sent FROM pv_two_screens_sessions WHERE user_id=$1 FOR UPDATE",
+                    user_id,
+                )
+                if two_screens:
+                    status = two_screens["status"]
+                    if status == "awaiting_optin":
+                        if two_screens_response_kind == "positive":
+                            await conn.execute(
+                                "UPDATE pv_two_screens_sessions SET status='question_queued',updated_at=NOW() WHERE user_id=$1",
+                                user_id,
+                            )
+                            await conn.execute(
+                                """INSERT INTO outbox_actions(action_key,module_id,action_type,payload)
+                                   VALUES($1,'pv_reply','send_two_screens_question',$2::jsonb)
+                                   ON CONFLICT(action_key) DO NOTHING""",
+                                f"pv_reply:two-screens:question:{user_id}",
+                                _json({"peer": user_id}),
+                            )
+                            return "two_screens_question_queued"
+                        if two_screens_response_kind == "negative":
+                            await conn.execute(
+                                "UPDATE pv_two_screens_sessions SET status='completed',completed_at=NOW(),updated_at=NOW() WHERE user_id=$1",
+                                user_id,
+                            )
+                            return "two_screens_declined"
+                        return "two_screens_waiting"
+                    if status == "awaiting_choice":
+                        if two_screens_choice:
+                            await conn.execute(
+                                "UPDATE pv_two_screens_sessions SET status='photo_queued',selected_slot=$2,updated_at=NOW() WHERE user_id=$1",
+                                user_id,
+                                two_screens_choice,
+                            )
+                            await conn.execute(
+                                """INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
+                                   VALUES($1,'pv_reply','send_two_screens_photo',$2::jsonb,
+                                     NOW()+($3::double precision*INTERVAL '1 second'))
+                                   ON CONFLICT(action_key) DO NOTHING""",
+                                f"pv_reply:two-screens:photo:{user_id}",
+                                _json({"peer": user_id, "slot": two_screens_choice}),
+                                two_screens_photo_delay_seconds,
+                            )
+                            return "two_screens_photo_queued"
+                        if not bool(two_screens["choice_retry_sent"]):
+                            await conn.execute(
+                                """UPDATE pv_two_screens_sessions
+                                   SET choice_retry_sent=TRUE,updated_at=NOW()
+                                   WHERE user_id=$1""",
+                                user_id,
+                            )
+                            await conn.execute(
+                                """INSERT INTO outbox_actions(action_key,module_id,action_type,payload)
+                                   VALUES($1,'pv_reply','send_two_screens_retry',$2::jsonb)
+                                   ON CONFLICT(action_key) DO NOTHING""",
+                                f"pv_reply:two-screens:retry:{user_id}",
+                                _json({"peer": user_id}),
+                            )
+                            return "two_screens_retry_queued"
+                        return "two_screens_invalid_choice"
+
                 if contact["stage"] == "awaiting_reply":
                     await conn.execute(
                         """UPDATE pv_reply_contacts SET stage='link_queued',
@@ -449,6 +522,62 @@ class Storage:
                     delay_seconds,
                 )
                 return "conditional_link_queued"
+
+    async def two_screens_action_allowed(self, user_id: int, status: str) -> bool:
+        return bool(await self.pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM pv_two_screens_sessions WHERE user_id=$1 AND status=$2)", user_id, status
+        ))
+
+    async def advance_two_screens(self, user_id: int, expected: str, next_status: str) -> bool:
+        updated = await self.pool.fetchval(
+            """UPDATE pv_two_screens_sessions SET status=$3,updated_at=NOW()
+               WHERE user_id=$1 AND status=$2 RETURNING user_id""",
+            user_id, expected, next_status,
+        )
+        return updated is not None
+
+    async def queue_next_two_screens_action(
+        self, user_id: int, *, expected: str, next_status: str, action_type: str,
+        action_key: str, delay_seconds: int,
+    ) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.fetchval(
+                    """UPDATE pv_two_screens_sessions SET status=$3,updated_at=NOW()
+                       WHERE user_id=$1 AND status=$2 RETURNING user_id""",
+                    user_id, expected, next_status,
+                )
+                if updated is None:
+                    return False
+                await conn.execute(
+                    """INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
+                       VALUES($1,'pv_reply',$2,$3::jsonb,NOW()+($4::double precision*INTERVAL '1 second'))
+                       ON CONFLICT(action_key) DO NOTHING""",
+                    action_key, action_type, _json({"peer": user_id}), delay_seconds,
+                )
+                return True
+
+    async def two_screens_media_slot(self, slot: str):
+        return await self.pool.fetchrow(
+            "SELECT source_peer,source_message_id FROM pv_two_screens_media_slots WHERE slot=$1", slot
+        )
+
+    async def mark_two_screens_photo_sent(self, user_id: int, slot: str) -> bool:
+        updated = await self.pool.fetchval(
+            """UPDATE pv_two_screens_sessions SET status='completed',completed_at=NOW(),updated_at=NOW()
+               WHERE user_id=$1 AND status='photo_queued' AND selected_slot=$2 RETURNING user_id""",
+            user_id, slot,
+        )
+        return updated is not None
+
+    async def set_two_screens_media_slot(self, *, slot: str, source_peer: int, source_message_id: int, updated_by: int) -> None:
+        await self.pool.execute(
+            """INSERT INTO pv_two_screens_media_slots(slot,source_peer,source_message_id,updated_by)
+               VALUES($1,$2,$3,$4) ON CONFLICT(slot) DO UPDATE SET
+               source_peer=EXCLUDED.source_peer,source_message_id=EXCLUDED.source_message_id,
+               updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
+            slot, source_peer, source_message_id, updated_by,
+        )
 
     async def queue_live_optin(self, user_id: int, delay_seconds: int = 1200) -> None:
         await self.pool.execute(
@@ -654,6 +783,8 @@ class Storage:
         delay_seconds: int,
         weekly_delay_seconds: int,
         max_cycles: int,
+        two_screens_enabled: bool = False,
+        two_screens_delay_seconds: int = 20,
     ) -> bool:
         """Record link delivery and create the first follow-up atomically."""
         async with self.pool.acquire() as conn:
@@ -689,6 +820,12 @@ class Storage:
                         ),
                         due,
                     )
+                    await self._queue_two_screens_after_link(
+                        conn,
+                        user_id=user_id,
+                        enabled=two_screens_enabled,
+                        delay_seconds=two_screens_delay_seconds,
+                    )
                     return True
                 await conn.execute(
                     """UPDATE pv_reply_contacts SET stage='following_up',
@@ -714,7 +851,45 @@ class Storage:
                     ),
                     delay_seconds,
                 )
+                await self._queue_two_screens_after_link(
+                    conn,
+                    user_id=user_id,
+                    enabled=two_screens_enabled,
+                    delay_seconds=two_screens_delay_seconds,
+                )
                 return True
+
+    @staticmethod
+    async def _queue_two_screens_after_link(
+        conn, *, user_id: int, enabled: bool, delay_seconds: int
+    ) -> bool:
+        """Queue the branch in the link transaction, only with all media ready."""
+        if not enabled:
+            return False
+        media_ready = await conn.fetchval(
+            """SELECT COUNT(*) = 3 FROM pv_two_screens_media_slots
+               WHERE slot IN ('peitos','buceta','cu')"""
+        )
+        if not media_ready:
+            return False
+        inserted = await conn.fetchval(
+            """INSERT INTO pv_two_screens_sessions(user_id,status)
+               VALUES($1,'prompt_queued') ON CONFLICT(user_id) DO NOTHING
+               RETURNING user_id""",
+            user_id,
+        )
+        if inserted is None:
+            return False
+        await conn.execute(
+            """INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
+               VALUES($1,'pv_reply','send_two_screens_prompt',$2::jsonb,
+                 NOW()+($3::double precision*INTERVAL '1 second'))
+               ON CONFLICT(action_key) DO NOTHING""",
+            f"pv_reply:two-screens:prompt:{user_id}",
+            _json({"peer": user_id}),
+            delay_seconds,
+        )
+        return True
 
     async def complete_pv_followup_and_schedule_next(
         self,

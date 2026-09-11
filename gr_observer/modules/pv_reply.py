@@ -19,6 +19,9 @@ log = logging.getLogger("gr-observer.pv-reply")
 LINK_BALLOON_DELAY_SECONDS = 7
 LIVE_OPTIN_DELAY_SECONDS = 20 * 60
 LIVE_REMARKETING_DELAY_SECONDS = 10 * 60
+TWO_SCREENS_PROMPT_DELAY_SECONDS = 20
+TWO_SCREENS_BALLOON_DELAY_RANGE_SECONDS = (5, 8)
+TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS = (4, 7)
 
 
 def classify_response(text: str) -> str:
@@ -43,6 +46,38 @@ def classify_live_response(text: str) -> str:
     if any(value in normalized for value in ("manda o link", "quero ver")):
         return "positive"
     return "unknown"
+
+
+def classify_two_screens_response(text: str) -> str:
+    """A narrow acknowledgement classifier for the optional post-link prompt."""
+    normalized = normalize_text(text)
+    if any(value in normalized for value in ("parar", "não envie", "nao envie")):
+        return "opt_out"
+    if normalized in {"não", "nao", "não quero", "nao quero"}:
+        return "negative"
+    if normalized in {"sim", "quero", "pode", "manda", "faz"}:
+        return "positive"
+    return "unknown"
+
+
+def classify_two_screens_choice(text: str) -> str | None:
+    normalized = normalize_text(text)
+    # The slots are intentionally fixed so a sentence such as "manda" never
+    # selects media by accident.
+    if "peito" in normalized:
+        return "peitos"
+    if any(value in normalized for value in ("buceta", "xereca", "vagina")):
+        return "buceta"
+    if any(value in normalized for value in ("cu", "bunda", "anal")):
+        return "cu"
+    return None
+
+
+def stable_delay_seconds(key: str, minimum: int, maximum: int) -> int:
+    """Choose an inclusive, retry-stable delay inside the approved window."""
+    low, high = sorted((int(minimum), int(maximum)))
+    width = (high - low) + 1
+    return low + (int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % width)
 
 
 def is_human_sender(sender) -> bool:
@@ -137,6 +172,12 @@ class PvReplyModule:
             self.module_id, "send_live_remarketing", self.action_send_live_remarketing
         )
         writer.register(self.module_id, "send_live_link", self.action_send_live_link)
+        writer.register(self.module_id, "send_two_screens_prompt", self.action_send_two_screens_prompt)
+        writer.register(self.module_id, "send_two_screens_question", self.action_send_two_screens_question)
+        writer.register(self.module_id, "send_two_screens_limit", self.action_send_two_screens_limit)
+        writer.register(self.module_id, "send_two_screens_followup", self.action_send_two_screens_followup)
+        writer.register(self.module_id, "send_two_screens_retry", self.action_send_two_screens_retry)
+        writer.register(self.module_id, "send_two_screens_photo", self.action_send_two_screens_photo)
         writer.register(
             self.module_id, "close_live_recipient", self.action_close_live_recipient
         )
@@ -163,6 +204,12 @@ class PvReplyModule:
             display_name=display_name(sender),
             response_kind=classify_response(event.raw_text or ""),
             live_response_kind=classify_live_response(event.raw_text or ""),
+            two_screens_response_kind=classify_two_screens_response(event.raw_text or ""),
+            two_screens_choice=classify_two_screens_choice(event.raw_text or ""),
+            two_screens_photo_delay_seconds=stable_delay_seconds(
+                f"two-screens-photo:{sender_id}:{event.id}",
+                *TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
+            ),
             delay_seconds=self.settings.pv_reply_delay_seconds,
         )
         # The Radar may still record a probable origin for this same PV. The
@@ -204,6 +251,7 @@ class PvReplyModule:
                 f"Depois: {self.campaign_text('pv.weekly_question')} + sequência semanal",
                 f"Periodicidade semanal: {self.settings.pv_weekly_interval_hours:g} h",
                 "Resposta positiva encerra sem nova mensagem; resposta negativa recebe o link.",
+                "Após o link: ramo opcional ‘Faz duas telas?’ em 20 s; foto somente após escolha.",
                 "‘Parar’ ou ‘não quero’ encerra tudo.",
             ]
         )
@@ -240,6 +288,8 @@ class PvReplyModule:
             delay_seconds=self.delay_for_cycle(peer, 1),
             weekly_delay_seconds=self.weekly_delay_seconds,
             max_cycles=self.settings.pv_followup_max_cycles,
+            two_screens_enabled=self.settings.pv_two_screens_enabled,
+            two_screens_delay_seconds=TWO_SCREENS_PROMPT_DELAY_SECONDS,
         )
         if advanced:
             await self.storage.queue_live_optin(peer, LIVE_OPTIN_DELAY_SECONDS)
@@ -346,6 +396,78 @@ class PvReplyModule:
         )
         await self.storage.mark_live_optin_asked(peer)
         return {"sent": True, **result}
+
+    async def action_send_two_screens_prompt(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.two_screens_action_allowed(peer, "prompt_queued"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(peer, self.campaign_text("pv.two_screens.prompt"), f"{action['action_key']}:send")
+        advanced = await self.storage.advance_two_screens(peer, "prompt_queued", "awaiting_optin")
+        return {"sent": True, "advanced": advanced, **result}
+
+    async def action_send_two_screens_question(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.two_screens_action_allowed(peer, "question_queued"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(peer, self.campaign_text("pv.two_screens.question"), f"{action['action_key']}:send")
+        advanced = await self.storage.queue_next_two_screens_action(
+            peer, expected="question_queued", next_status="limit_queued",
+            action_type="send_two_screens_limit", action_key=f"pv_reply:two-screens:limit:{peer}",
+            delay_seconds=stable_delay_seconds(
+                f"{action['action_key']}:limit-delay",
+                *TWO_SCREENS_BALLOON_DELAY_RANGE_SECONDS,
+            ),
+        )
+        return {"sent": True, "advanced": advanced, **result}
+
+    async def action_send_two_screens_limit(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.two_screens_action_allowed(peer, "limit_queued"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(peer, self.campaign_text("pv.two_screens.limit"), f"{action['action_key']}:send")
+        advanced = await self.storage.queue_next_two_screens_action(
+            peer, expected="limit_queued", next_status="followup_queued",
+            action_type="send_two_screens_followup", action_key=f"pv_reply:two-screens:followup:{peer}",
+            delay_seconds=stable_delay_seconds(
+                f"{action['action_key']}:followup-delay",
+                *TWO_SCREENS_BALLOON_DELAY_RANGE_SECONDS,
+            ),
+        )
+        return {"sent": True, "advanced": advanced, **result}
+
+    async def action_send_two_screens_followup(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.two_screens_action_allowed(peer, "followup_queued"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(peer, self.campaign_text("pv.two_screens.followup"), f"{action['action_key']}:send")
+        advanced = await self.storage.advance_two_screens(peer, "followup_queued", "awaiting_choice")
+        return {"sent": True, "advanced": advanced, **result}
+
+    async def action_send_two_screens_retry(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self.storage.two_screens_action_allowed(peer, "awaiting_choice"):
+            return {"sent": False, "reason": "state_changed"}
+        result = await effects.send_text(
+            peer,
+            self.campaign_text("pv.two_screens.retry"),
+            f"{action['action_key']}:send",
+        )
+        return {"sent": True, **result}
+
+    async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        slot = str(action["payload"]["slot"])
+        if not await self.storage.two_screens_action_allowed(peer, "photo_queued"):
+            return {"sent": False, "reason": "state_changed"}
+        media = await self.storage.two_screens_media_slot(slot)
+        if not media:
+            return {"sent": False, "reason": "media_slot_missing", "slot": slot}
+        result = await effects.forward_message(
+            int(media["source_peer"]), int(media["source_message_id"]), peer,
+            f"{action['action_key']}:send",
+        )
+        advanced = await self.storage.mark_two_screens_photo_sent(peer, slot)
+        return {"sent": True, "advanced": advanced, "slot": slot, **result}
 
     async def action_send_live_invite(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
