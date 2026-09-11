@@ -38,32 +38,52 @@ DIALOGS = {
 
 # Text is centralized here; the private invite itself stays in Railway's
 # ``PV_PREVIEW_LINK`` variable and is never committed to the public repository.
+PV_GREETING_VARIANTS = (
+    "Quer ver minha esposa puta?",
+    "Quer ver a minha puta?",
+    "Quer ver minha safada?",
+    "Quer ver minha esposa bem safada?",
+    "Quer ver minha puta aprontando?",
+    "Quer ver minha esposa sem-vergonha?",
+    "Tá a fim de ver minha safada?",
+    "Quer ver como minha esposa é puta?",
+    "Quer conhecer a minha safada?",
+    "Quer ver a minha mulher bem puta?",
+)
+
 CAMPAIGNS = {
     "pv.greeting": {
         "order": 10,
         "module": "pv_reply",
-        "text": "Oi 😊 Tudo bem? Quer ver a minha esposa puta?",
+        "text": PV_GREETING_VARIANTS[0],
     },
-    "pv.preview_link": {
+    "pv.link_invite": {
         "order": 20,
         "module": "pv_reply",
-        "text": (
-            "Se quiser ver mais, entre no canal de prévias 😊\n"
-            "{preview_link}"
-        ),
+        "text": "Entra no grupo de prévias dela! Posso mandar o link",
     },
-    "pv.followup": {
+    "pv.preview_link": {
         "order": 30,
         "module": "pv_reply",
-        "text": (
-            "Gostou? Já entrou no canal de prévias? 😊\n"
-            "{preview_link}"
-        ),
+        "text": "{preview_link}",
     },
-    "pv.weekly_question": {
+    "pv.followup": {
         "order": 40,
         "module": "pv_reply",
-        "text": "Oi 😊 Já entrou no canal de prévias? Gostou?",
+        "text": "Gostou? Já gozou pra ela??",
+    },
+    "pv.weekly_question": {
+        "order": 50,
+        "module": "pv_reply",
+        "text": "E aí, safado! Tá gozando muito?",
+    },
+    "pv.weekly_reentry": {
+        "order": 60,
+        "module": "pv_reply",
+        "text": (
+            "Se ainda não entrou ou se saiu, entra de novo. "
+            "Abre em duas telas e goza pra ela ver 😈"
+        ),
     },
 }
 

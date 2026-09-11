@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 
-from ..catalog import CAMPAIGNS, PV_RESPONSE_RULES, normalize_text
+from ..catalog import (
+    CAMPAIGNS,
+    PV_GREETING_VARIANTS,
+    PV_RESPONSE_RULES,
+    normalize_text,
+)
 
 log = logging.getLogger("gr-observer.pv-reply")
+LINK_BALLOON_DELAY_SECONDS = 7
 
 
 def classify_response(text: str) -> str:
@@ -49,6 +56,13 @@ def display_name(sender) -> str:
 
 def render_campaign(campaign_id: str, preview_link: str) -> str:
     return CAMPAIGNS[campaign_id]["text"].format(preview_link=preview_link)
+
+
+def greeting_for(action_key: str) -> str:
+    """Choose one approved greeting while keeping retries idempotent."""
+    digest = hashlib.sha256(action_key.encode()).digest()
+    index = int.from_bytes(digest[:8], "big") % len(PV_GREETING_VARIANTS)
+    return PV_GREETING_VARIANTS[index]
 
 
 def followup_delay_seconds(
@@ -149,12 +163,13 @@ class PvReplyModule:
         return "\n\n".join(
             [
                 "ATENDIMENTO PV — PRÉVIA",
-                f"1. {self.campaign_text('pv.greeting')}",
-                f"2. {self.campaign_text('pv.preview_link')}",
-                f"Lembrete: {self.campaign_text('pv.followup')}",
+                f"1. Uma de {len(PV_GREETING_VARIANTS)} aberturas aprovadas",
+                f"2. {self.campaign_text('pv.link_invite')}",
+                f"3. Após {LINK_BALLOON_DELAY_SECONDS} s: {self.campaign_text('pv.preview_link')}",
+                f"Lembrete: {self.campaign_text('pv.followup')} + link separado",
                 f"Atraso das duas primeiras mensagens: {self.settings.pv_reply_delay_seconds} s",
                 f"Intervalos progressivos até o limite semanal: {schedule}",
-                f"Depois: {self.campaign_text('pv.weekly_question')}",
+                f"Depois: {self.campaign_text('pv.weekly_question')} + sequência semanal",
                 f"Periodicidade semanal: {self.settings.pv_weekly_interval_hours:g} h",
                 "Resposta positiva encerra sem nova mensagem; resposta negativa recebe o link.",
                 "‘Parar’ ou ‘não quero’ encerra tudo.",
@@ -167,7 +182,7 @@ class PvReplyModule:
             return {"sent": False, "reason": "state_changed"}
         result = await effects.send_text(
             peer,
-            self.campaign_text("pv.greeting"),
+            greeting_for(action["action_key"]),
             f"{action['action_key']}:send",
         )
         advanced = await self.storage.mark_pv_greeting_sent(peer)
@@ -177,10 +192,16 @@ class PvReplyModule:
         peer = int(action["payload"]["peer"])
         if not await self.storage.pv_action_allowed(peer, "link_queued"):
             return {"sent": False, "reason": "state_changed"}
-        result = await effects.send_text(
+        invite = await effects.send_text(
+            peer,
+            self.campaign_text("pv.link_invite"),
+            f"{action['action_key']}:invite",
+        )
+        await asyncio.sleep(LINK_BALLOON_DELAY_SECONDS)
+        link = await effects.send_text(
             peer,
             self.campaign_text("pv.preview_link"),
-            f"{action['action_key']}:send",
+            f"{action['action_key']}:link",
         )
         advanced = await self.storage.mark_pv_link_sent_and_schedule(
             user_id=peer,
@@ -188,7 +209,7 @@ class PvReplyModule:
             weekly_delay_seconds=self.weekly_delay_seconds,
             max_cycles=self.settings.pv_followup_max_cycles,
         )
-        return {"sent": True, "advanced": advanced, **result}
+        return {"sent": True, "advanced": advanced, "invite": invite, "link": link}
 
     async def action_send_followup(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
@@ -197,10 +218,15 @@ class PvReplyModule:
             peer, "following_up", cycle
         ):
             return {"sent": False, "reason": "state_changed", "cycle": cycle}
-        result = await effects.send_text(
+        reminder = await effects.send_text(
             peer,
             self.campaign_text("pv.followup"),
-            f"{action['action_key']}:send",
+            f"{action['action_key']}:reminder",
+        )
+        link = await effects.send_text(
+            peer,
+            self.campaign_text("pv.preview_link"),
+            f"{action['action_key']}:link",
         )
         next_cycle = cycle + 1
         next_delay = (
@@ -219,7 +245,8 @@ class PvReplyModule:
             "sent": True,
             "advanced": advanced,
             "cycle": cycle,
-            **result,
+            "reminder": reminder,
+            "link": link,
         }
 
     async def action_send_reminder_link(self, action: dict, effects) -> dict:
@@ -238,10 +265,26 @@ class PvReplyModule:
         cycle = int(action["payload"]["cycle"])
         if not await self.storage.pv_action_allowed(peer, "weekly", cycle):
             return {"sent": False, "reason": "state_changed", "cycle": cycle}
-        result = await effects.send_text(
+        question = await effects.send_text(
             peer,
             self.campaign_text("pv.weekly_question"),
-            f"{action['action_key']}:send",
+            f"{action['action_key']}:question",
+        )
+        await asyncio.sleep(LINK_BALLOON_DELAY_SECONDS)
+        first_link = await effects.send_text(
+            peer,
+            self.campaign_text("pv.preview_link"),
+            f"{action['action_key']}:first-link",
+        )
+        reentry = await effects.send_text(
+            peer,
+            self.campaign_text("pv.weekly_reentry"),
+            f"{action['action_key']}:reentry",
+        )
+        second_link = await effects.send_text(
+            peer,
+            self.campaign_text("pv.preview_link"),
+            f"{action['action_key']}:second-link",
         )
         advanced = await self.storage.complete_pv_weekly_and_schedule_next(
             user_id=peer,
@@ -252,5 +295,8 @@ class PvReplyModule:
             "sent": True,
             "advanced": advanced,
             "cycle": cycle,
-            **result,
+            "question": question,
+            "first_link": first_link,
+            "reentry": reentry,
+            "second_link": second_link,
         }

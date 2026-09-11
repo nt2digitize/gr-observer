@@ -142,12 +142,15 @@ privado não fica no repositório público. Os textos ficam no dicionário
 Fluxo:
 
 1. primeiro PV recebido de uma conta que o Telegram não marca como bot: após
-   60 segundos, envia `Oi 😊 Tudo bem? Quer ver a minha esposa puta?`;
-2. depois de qualquer resposta, envia o convite da prévia após 60 segundos;
-3. após o convite, pergunta se gostou/já entrou e inclui o link. Os intervalos
+   60 segundos, envia uma das dez aberturas curtas aprovadas;
+2. depois de qualquer resposta, aguarda 60 segundos, envia
+   `Entra no grupo de prévias dela! Posso mandar o link`, espera 7 segundos e
+   envia o link sozinho em outro balão;
+3. nos lembretes, envia `Gostou? Já gozou pra ela??` e o link em um balão
+   separado. Os intervalos
    crescem aproximadamente de 1 até 7 dias: 23–25 h, 47–49 h, …, 167–169 h;
-4. atingido o limite, envia somente a pergunta amistosa uma vez por semana,
-   sem link;
+4. atingido o limite, envia semanalmente a pergunta aprovada, espera 7 segundos,
+   envia o link sozinho, envia o convite para retornar e repete o link sozinho;
 5. resposta positiva encerra em silêncio; resposta negativa recebe o link;
 6. `parar`, `não quero` e equivalentes encerram a sequência.
 

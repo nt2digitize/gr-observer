@@ -15,6 +15,7 @@ from gr_observer.catalog import (
     CAMPAIGNS,
     COMMANDS,
     MODULES,
+    PV_GREETING_VARIANTS,
     match_command,
     parse_botson_detail,
     validate_catalog,
@@ -27,6 +28,7 @@ from gr_observer.modules.pv_reply import (
     PvReplyModule,
     classify_response,
     followup_delay_seconds,
+    greeting_for,
     is_human_sender,
 )
 from gr_observer.modules.radar import RadarModule
@@ -273,9 +275,22 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_approved_greeting_copy_is_preserved(self):
         self.assertEqual(
-            CAMPAIGNS["pv.greeting"]["text"],
-            "Oi 😊 Tudo bem? Quer ver a minha esposa puta?",
+            PV_GREETING_VARIANTS,
+            (
+                "Quer ver minha esposa puta?",
+                "Quer ver a minha puta?",
+                "Quer ver minha safada?",
+                "Quer ver minha esposa bem safada?",
+                "Quer ver minha puta aprontando?",
+                "Quer ver minha esposa sem-vergonha?",
+                "Tá a fim de ver minha safada?",
+                "Quer ver como minha esposa é puta?",
+                "Quer conhecer a minha safada?",
+                "Quer ver a minha mulher bem puta?",
+            ),
         )
+        self.assertIn(greeting_for("same-action"), PV_GREETING_VARIANTS)
+        self.assertEqual(greeting_for("same-action"), greeting_for("same-action"))
 
     def test_weekly_answers_and_opt_out_are_classified(self):
         self.assertEqual(classify_response("Sim, já entrei e gostei"), "positive")
@@ -340,27 +355,64 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
             "action_key": "pv-link",
             "payload": {"peer": 10, "campaign_id": "pv.preview_link"},
         }
-        result = await module.action_send_link(action, effects)
+        with patch("gr_observer.modules.pv_reply.asyncio.sleep", AsyncMock()) as sleep:
+            result = await module.action_send_link(action, effects)
         self.assertTrue(result["sent"])
+        self.assertEqual(effects.send_text.await_count, 2)
+        self.assertEqual(
+            effects.send_text.await_args_list[0].args[1],
+            "Entra no grupo de prévias dela! Posso mandar o link",
+        )
+        self.assertEqual(
+            effects.send_text.await_args_list[1].args[1],
+            "https://t.me/+private-test-link",
+        )
+        sleep.assert_awaited_once_with(7)
         call = storage.mark_pv_link_sent_and_schedule.call_args.kwargs
         self.assertTrue(23 * 3600 <= call["delay_seconds"] <= 25 * 3600)
         self.assertEqual(call["weekly_delay_seconds"], 7 * 24 * 3600)
         self.assertEqual(call["max_cycles"], 7)
 
-    async def test_weekly_question_has_no_link_and_schedules_one_week(self):
+    async def test_weekly_sequence_uses_separate_link_balloons(self):
         module, storage = self.module()
         effects = NS(send_text=AsyncMock(return_value={"message_id": 9}))
         action = {
             "action_key": "weekly-1",
             "payload": {"peer": 10, "campaign_id": "pv.weekly_question", "cycle": 1},
         }
-        result = await module.action_send_weekly_question(action, effects)
+        with patch("gr_observer.modules.pv_reply.asyncio.sleep", AsyncMock()) as sleep:
+            result = await module.action_send_weekly_question(action, effects)
         self.assertTrue(result["sent"])
-        sent_text = effects.send_text.call_args.args[1]
-        self.assertNotIn("https://", sent_text)
-        self.assertIn("Já entrou", sent_text)
+        texts = [call.args[1] for call in effects.send_text.await_args_list]
+        self.assertEqual(
+            texts,
+            [
+                "E aí, safado! Tá gozando muito?",
+                "https://t.me/+private-test-link",
+                (
+                    "Se ainda não entrou ou se saiu, entra de novo. "
+                    "Abre em duas telas e goza pra ela ver 😈"
+                ),
+                "https://t.me/+private-test-link",
+            ],
+        )
+        sleep.assert_awaited_once_with(7)
         call = storage.complete_pv_weekly_and_schedule_next.call_args.kwargs
         self.assertEqual(call["delay_seconds"], 7 * 24 * 3600)
+
+    async def test_followup_uses_text_and_link_as_separate_balloons(self):
+        module, storage = self.module()
+        effects = NS(send_text=AsyncMock(return_value={"message_id": 10}))
+        action = {
+            "action_key": "followup-1",
+            "payload": {"peer": 10, "campaign_id": "pv.followup", "cycle": 1},
+        }
+        result = await module.action_send_followup(action, effects)
+        self.assertTrue(result["sent"])
+        self.assertEqual(
+            [call.args[1] for call in effects.send_text.await_args_list],
+            ["Gostou? Já gozou pra ela??", "https://t.me/+private-test-link"],
+        )
 
 
 class OutboxTests(unittest.IsolatedAsyncioTestCase):
