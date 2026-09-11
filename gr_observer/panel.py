@@ -5,9 +5,18 @@ from __future__ import annotations
 import re
 
 from telethon import Button, events
+from telethon.tl import types
 
 from .catalog import BRAND, COMMANDS, DIALOGS, match_command
 from .domain import source_label
+
+
+def preferred_command_text(spec: dict) -> str:
+    """Prefer the familiar slash form, falling back to an accepted phrase."""
+    return next(
+        (value for value in spec["triggers"] if value.startswith("/")),
+        spec["triggers"][0],
+    )
 
 
 class ControlPanel:
@@ -194,11 +203,16 @@ class ControlPanel:
         for _, spec in sorted(COMMANDS.items(), key=lambda entry: entry[1]["order"]):
             if "panel" not in spec["surfaces"]:
                 continue
-            preferred = next(
-                (value for value in spec["triggers"] if not value.startswith("/")),
-                spec["triggers"][0],
-            )
+            preferred = preferred_command_text(spec)
             lines.append(f"• {preferred} — {spec['help']}")
+            buttons.append(
+                [
+                    types.KeyboardButtonCopy(
+                        text=f"📋 Copiar {preferred}",
+                        copy_text=preferred,
+                    )
+                ]
+            )
         buttons.append([Button.inline("↩️ Início", b"home")])
         text = "\n".join(lines)
         if isinstance(event, events.CallbackQuery.Event):
