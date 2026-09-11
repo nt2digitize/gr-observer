@@ -126,7 +126,7 @@ privado não fica no repositório público. Os textos ficam no dicionário
 Fluxo:
 
 1. primeiro PV recebido de uma conta que o Telegram não marca como bot: após
-   60 segundos, envia `Oi 😊 Tudo bem? Quer ver a esposa?`;
+   60 segundos, envia `Oi 😊 Tudo bem? Quer ver a minha esposa puta?`;
 2. depois de qualquer resposta, envia o convite da prévia após 60 segundos;
 3. após o convite, pergunta se gostou/já entrou e inclui o link. Os intervalos
    crescem aproximadamente de 1 até 7 dias: 23–25 h, 47–49 h, …, 167–169 h;

@@ -42,7 +42,7 @@ CAMPAIGNS = {
     "pv.greeting": {
         "order": 10,
         "module": "pv_reply",
-        "text": "Oi 😊 Tudo bem? Quer ver a esposa?",
+        "text": "Oi 😊 Tudo bem? Quer ver a minha esposa puta?",
     },
     "pv.preview_link": {
         "order": 20,

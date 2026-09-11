@@ -270,6 +270,12 @@ class PvReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_human_sender(NS(id=10, bot=False, deleted=True)))
         self.assertFalse(is_human_sender(NS(id=777000, bot=False, deleted=False)))
 
+    def test_approved_greeting_copy_is_preserved(self):
+        self.assertEqual(
+            CAMPAIGNS["pv.greeting"]["text"],
+            "Oi 😊 Tudo bem? Quer ver a minha esposa puta?",
+        )
+
     def test_weekly_answers_and_opt_out_are_classified(self):
         self.assertEqual(classify_response("Sim, já entrei e gostei"), "positive")
         self.assertEqual(classify_response("Ainda não entrei"), "negative")

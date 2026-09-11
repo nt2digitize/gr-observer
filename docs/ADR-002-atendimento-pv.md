@@ -21,7 +21,7 @@ mesma sessão de usuário e o Writer do monólito, sem criar outro
 
 Textos aprovados no catálogo:
 
-1. `Oi 😊 Tudo bem? Quer ver a esposa?`
+1. `Oi 😊 Tudo bem? Quer ver a minha esposa puta?`
 2. `Se quiser ver mais, entre no canal de prévias 😊` + convite privado.
 3. Primeira fase: `Gostou? Já entrou no canal de prévias? 😊` + convite.
 4. Fase semanal: `Oi 😊 Já entrou no canal de prévias? Gostou?`, sem convite.
