@@ -66,9 +66,9 @@ class ExtendedControlPanel(BaseControlPanel):
         command_id = match_command(event.raw_text or "", "panel")
         if command_id == "group_reply.enable":
             item = self.app.registry.get("group_reply")
-            if not item.implementation.allowlist:
+            if not item.implementation.allowlist_raw:
                 await event.respond(
-                    "Atendimento de Grupos não ligado: configure GROUP_REPLY_ALLOWLIST com IDs ou @usernames dos grupos permitidos.",
+                    "Atendimento de Grupos não ligado: configure GROUP_REPLY_ALLOWLIST com IDs, @usernames ou links privados dos grupos permitidos.",
                     parse_mode=None,
                 )
                 return
@@ -98,7 +98,7 @@ class ExtendedControlPanel(BaseControlPanel):
         if data in {"module:group_reply:on", "module:group_reply:off"}:
             enabled = data.endswith(":on")
             item = self.app.registry.get("group_reply")
-            if enabled and not item.implementation.allowlist:
+            if enabled and not item.implementation.allowlist_raw:
                 await event.answer(
                     "Configure GROUP_REPLY_ALLOWLIST antes de ligar.", alert=True
                 )
@@ -136,7 +136,7 @@ async def _setup_with_group_reply(self) -> None:
 
     item = self.registry.get("group_reply")
     if item.enabled:
-        if not module.allowlist:
+        if not module.allowlist_raw:
             item.enabled = False
             item.reason = "Falta configurar GROUP_REPLY_ALLOWLIST"
             await self.storage.set_module_state(item.module_id, False, item.reason)
