@@ -38,7 +38,6 @@ from gr_observer.outbox import (
     TelegramEffects,
     stable_random_id,
 )
-from gr_observer.panel import preferred_command_text
 from gr_observer.registry import ModuleRegistry
 from gr_observer.schema import SCHEMA
 from gr_observer.storage import run_id_for
@@ -80,16 +79,6 @@ class CatalogTests(unittest.TestCase):
     def test_source_has_name_and_id(self):
         self.assertEqual(source_label("Grupo Teste", -100123), "Grupo Teste (-100123)")
         self.assertEqual(source_label(None, -100123), "-100123")
-
-    def test_copy_buttons_prefer_slash_commands(self):
-        self.assertEqual(preferred_command_text(COMMANDS["core.status"]), "/status")
-        self.assertEqual(
-            preferred_command_text(COMMANDS["pv_reply.enable"]),
-            "/ligar_atendimento",
-        )
-        self.assertEqual(
-            preferred_command_text(COMMANDS["botson.enable"]), "ligar botson"
-        )
 
     def test_command_catalog_has_no_ambiguous_alias(self):
         validate_catalog()

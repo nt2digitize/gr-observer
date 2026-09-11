@@ -180,9 +180,10 @@ PV_WEEKLY_INTERVAL_HOURS=168
 explicitamente autorizada. Depois que o estado for alterado no painel, um
 reinício não desfaz a pausa administrativa.
 
-No menu `Funções`, cada comando possui um botão nativo `📋 Copiar`. O toque
-apenas copia o texto; o administrador ainda precisa colá-lo e enviá-lo
-manualmente, evitando acionamentos acidentais.
+No menu `Funções`, os controles são botões diretos do painel. O administrador
+pode ligar, desligar, consultar o status, conferir as mensagens do PV e iniciar
+o teste BOTSON sem digitar ou copiar comandos. Os comandos de texto permanecem
+disponíveis como alternativa.
 
 ## Testar BOTSON
 

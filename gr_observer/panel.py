@@ -5,18 +5,9 @@ from __future__ import annotations
 import re
 
 from telethon import Button, events
-from telethon.tl import types
 
 from .catalog import BRAND, COMMANDS, DIALOGS, match_command
 from .domain import source_label
-
-
-def preferred_command_text(spec: dict) -> str:
-    """Prefer the familiar slash form, falling back to an accepted phrase."""
-    return next(
-        (value for value in spec["triggers"] if value.startswith("/")),
-        spec["triggers"][0],
-    )
 
 
 class ControlPanel:
@@ -114,6 +105,20 @@ class ControlPanel:
         if data == "functions":
             await self.show_functions(event)
             return
+        if data == "command:status":
+            await event.answer()
+            await event.respond(
+                self.app.status_text(), parse_mode=None, link_preview=False
+            )
+            return
+        if data == "command:pv_preview":
+            await event.answer()
+            await event.respond(
+                self.app.registry.get("pv_reply").implementation.preview(),
+                parse_mode=None,
+                link_preview=False,
+            )
+            return
         if data == "home":
             await self.show_dashboard(event)
             return
@@ -203,16 +208,16 @@ class ControlPanel:
         for _, spec in sorted(COMMANDS.items(), key=lambda entry: entry[1]["order"]):
             if "panel" not in spec["surfaces"]:
                 continue
-            preferred = preferred_command_text(spec)
-            lines.append(f"• {preferred} — {spec['help']}")
-            buttons.append(
-                [
-                    types.KeyboardButtonCopy(
-                        text=f"📋 Copiar {preferred}",
-                        copy_text=preferred,
-                    )
-                ]
+            preferred = next(
+                (value for value in spec["triggers"] if value.startswith("/")),
+                spec["triggers"][0],
             )
+            lines.append(f"• {preferred} — {spec['help']}")
+        buttons += [
+            [Button.inline("📊 Ver status", b"command:status")],
+            [Button.inline("💬 Ver mensagens do PV", b"command:pv_preview")],
+            [Button.inline("🧪 Executar teste BOTSON", b"botson:run")],
+        ]
         buttons.append([Button.inline("↩️ Início", b"home")])
         text = "\n".join(lines)
         if isinstance(event, events.CallbackQuery.Event):
