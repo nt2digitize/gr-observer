@@ -57,14 +57,19 @@ class GroupRepostTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_text_authorizes_chat_and_becomes_template(self):
         module, pool = self.module()
         event = SimpleNamespace(raw_text="meu texto", media=None, id=77)
+        entity = SimpleNamespace(id=1001, title="Grupo teste", username="grupo_teste", kind="group")
         with patch(
             "gr_observer.modules.group_reply.utils.get_peer_id", return_value=-1001
         ):
-            handled = await module._record_manual_template(event, object())
+            handled = await module._record_manual_template(event, entity)
 
         self.assertTrue(handled)
         self.assertIn(-1001, module.dynamic_chat_ids)
-        self.assertEqual(pool.execute.call_args.args[-2:], ("meu texto", 77))
+        self.assertEqual(pool.execute.await_count, 2)
+        template_args = pool.execute.await_args_list[0].args
+        self.assertEqual(template_args[-2:], ("meu texto", 77))
+        chat_args = pool.execute.await_args_list[1].args
+        self.assertEqual(chat_args[1:5], (-1001, "Grupo teste", "grupo_teste", "group"))
 
     async def test_automated_text_does_not_replace_manual_template(self):
         module, pool = self.module()

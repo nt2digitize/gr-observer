@@ -25,6 +25,7 @@ from telethon import errors, utils
 from telethon.tl.functions.messages import CheckChatInviteRequest
 
 from ..catalog import normalize_text
+from ..domain import kind_of, now, title_of
 
 log = logging.getLogger("gr-observer.group-reply")
 
@@ -248,6 +249,27 @@ class GroupReplyModule:
             text,
             int(event.id),
         )
+        # A successful manual post is stronger evidence than a permission scan:
+        # keep the organizer in sync even while the Radar module is disabled.
+        await self.pool.execute(
+            """INSERT INTO chats(
+                   chat_id,title,username,kind,can_text,last_seen,last_scanned,
+                   membership_status
+               ) VALUES($1,$2,$3,$4,TRUE,$5,$5,'joined')
+               ON CONFLICT(chat_id) DO UPDATE SET
+                   title=EXCLUDED.title,
+                   username=EXCLUDED.username,
+                   kind=EXCLUDED.kind,
+                   can_text=TRUE,
+                   last_seen=EXCLUDED.last_seen,
+                   last_scanned=EXCLUDED.last_scanned,
+                   membership_status='joined'""",
+            chat_id,
+            title_of(entity),
+            getattr(entity, "username", None),
+            kind_of(entity),
+            now(),
+        )
         self.dynamic_chat_ids.add(chat_id)
         return True
 
@@ -342,7 +364,9 @@ class GroupReplyModule:
             return False
         entity = await event.get_chat()
         if event.out:
-            return await self._record_manual_template(event, entity)
+            await self._record_manual_template(event, entity)
+            # Let other modules observe the outgoing post as well.
+            return False
         sender = await event.get_sender()
         if not sender or getattr(sender, "bot", False) or getattr(sender, "deleted", False):
             return False

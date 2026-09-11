@@ -210,14 +210,22 @@ class ControlPanel:
                 await event.answer("Atualizado.", alert=True)
             await self.show_link(event, link_id)
             return
-        chat_action = re.fullmatch(r"chat:(discard|restore):(-?\d+)", data)
+        chat_action = re.fullmatch(r"chat:(discard|restore|serve):(-?\d+)", data)
         if chat_action:
             action, chat_id = chat_action.groups()
-            await self.app.pool.execute(
-                "UPDATE chats SET disposition=$2 WHERE chat_id=$1",
-                int(chat_id),
-                "discarded" if action == "discard" else "active",
-            )
+            if action == "serve":
+                await self.app.pool.execute(
+                    """UPDATE chats SET can_text=TRUE, disposition='active',
+                       membership_status='joined', last_scanned=NOW()
+                       WHERE chat_id=$1""",
+                    int(chat_id),
+                )
+            else:
+                await self.app.pool.execute(
+                    "UPDATE chats SET disposition=$2 WHERE chat_id=$1",
+                    int(chat_id),
+                    "discarded" if action == "discard" else "active",
+                )
             await event.answer("Atualizado.", alert=True)
             await self.show_chat(event, int(chat_id))
             return
@@ -594,6 +602,10 @@ class ControlPanel:
                 [Button.inline("♻️ Restaurar", f"chat:restore:{chat_id}".encode())]
             )
         else:
+            if row["can_text"] is not True:
+                buttons.append(
+                    [Button.inline("✅ Marcar como serve", f"chat:serve:{chat_id}".encode())]
+                )
             buttons.append(
                 [Button.inline("🗑️ Marcar como não serve", f"chat:discard:{chat_id}".encode())]
             )
