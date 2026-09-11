@@ -1,119 +1,175 @@
-# GR Observer Cell
+# GR Observer — monólito modular
 
-MVP de observação passiva para uma conta Telegram. Ele inventaria os grupos e
-canais já acessíveis, registra permissões, regras publicadas, bots vistos,
-links e a provável origem de uma pessoa que chama no privado.
+Um único processo administra uma única sessão de usuário do Telegram e liga
+funções independentes (“costelas”) em uma coluna central. Hoje existem duas:
 
-## Limites deliberados
+1. **Radar** — observação passiva de grupos, canais, permissões, regras, bots,
+   links e origem provável de conversas privadas.
+2. **Testar BOTSON** — homologação ativa, limitada por allowlist, da jornada de
+   acesso, botões seguros, conversas, saída e reentrada.
 
-- não entra em links;
-- não envia mensagens em grupos ou canais;
+O painel de controle continua disponível mesmo quando as duas funções estão
+desligadas. O comando de produção permanece `python app.py`.
+
+## Estrutura
+
+```text
+app.py                         entrada compatível com Railway
+gr_observer/
+  application.py              coluna central e sessão única
+  catalog.py                  módulos, comandos e textos com IDs estáveis
+  storage.py / schema.py      estado, Inbox, Outbox, execuções e efeitos
+  outbox.py                   único Writer de ações ativas
+  panel.py                    bot administrativo
+  modules/
+    radar.py                  costela passiva
+    botson.py                 comandos e relatórios de homologação
+    botson_engine.py          jornada de teste allowlisted
+```
+
+O Radar não recebe o Writer e não contém chamadas para enviar mensagens,
+clicar, entrar ou sair. O BOTSON recebe um portão de efeitos e não abre outra
+`TelegramClient`. Assim as funções compartilham infraestrutura, mas não
+compartilham regra de negócio.
+
+## Comandos de texto
+
+O dicionário `COMMANDS` em `gr_observer/catalog.py` é a fonte única. A ordem é
+determinada pelo campo `order`; cada operação tem ID estável e aliases. No
+privado do bot de controle, apenas `ADMIN_USER_ID` pode usar:
+
+- `painel`, `/start` ou `/observador` — painel;
+- `status` ou `/status` — estado real;
+- `funcoes` ou `/funcoes` — funções na ordem do catálogo;
+- `ligar radar` ou `/ligar`;
+- `desligar radar` ou `/desligar`;
+- `ligar botson`;
+- `desligar botson`;
+- `testar botson` ou `/testar_botson` — coloca o teste na fila e entrega o
+  relatório no privado da conta controladora.
+
+Para preservar o runner anterior, a conta controladora também pode mandar
+`testar` diretamente no privado da conta de usuário. Depois do relatório:
+
+```text
+1
+1 acesso
+1 jornada
+1 conversas
+1 evidencias
+1 tecnico
+1 retestar
+```
+
+Essa gramática está no dicionário `BOTSON_DETAILS`, também ordenado e validado
+contra aliases duplicados pelos testes.
+
+## Dual Write
+
+O banco e o Telegram não participam da mesma transação. O monólito trata isso
+em três camadas:
+
+1. **Inbox + Outbox:** o evento recebido e a intenção de agir são gravados na
+   mesma transação PostgreSQL. Eventos repetidos não criam outra intenção.
+2. **Writer único:** somente um consumidor serial executa ações ativas usando a
+   sessão compartilhada.
+3. **Diário de efeitos:** cada envio, clique, entrada ou saída tem chave
+   determinística. Envios de texto usam `random_id` estável do Telegram.
+   Entrada/saída podem ser reconciliadas pelo estado de membro. Um efeito
+   interrompido e não reconciliável vai para `review`; nunca é repetido às
+   cegas.
+
+O resultado completo do teste e a intenção de entregar o relatório também são
+gravados na mesma transação. Isso evita “teste concluído no banco, mas relatório
+esquecido” após uma queda.
+
+As tabelas aditivas são `module_control`, `inbox_events`, `outbox_actions`,
+`module_runs` e `telegram_effects`. As tabelas antigas e `observer_control`
+continuam compatíveis.
+
+## Radar
+
+O comportamento original foi preservado:
+
+- inventaria grupos e canais já acessíveis;
+- registra permissões de texto e mídia sem interpretar prévia de link como
+  autorização de divulgação;
+- coleta trechos candidatos a regras, bots vistos e links;
+- relaciona menção/resposta em grupo com um PV posterior por sete dias;
+- cria rascunho de resposta, sem enviá-lo;
+- usa postagem manual bem-sucedida como evidência de permissão.
+
+Limites deliberados do Radar:
+
+- não entra em links ou grupos;
+- não envia nem responde pela conta;
 - não clica em botões;
 - não lista todos os membros;
-- não testa filtros ou palavras proibidas;
-- não responde automaticamente no privado;
-- uma sugestão de resposta vira rascunho, nunca envio.
+- não afirma que uma origem provável é definitiva.
 
-Filtros secretos de bots moderadores não são visíveis pela API. O sistema só
-marca regras publicadas e evidências observadas.
+Mensagens destinadas a membros devem continuar com linguagem nativa de chat.
+O texto preservado do rascunho é: `pera aí q vou ver o link certo p vc`.
 
-## Instalação
+## Testar BOTSON
 
-1. Crie um PostgreSQL e um bot privado de controle no BotFather.
-2. Copie `.env.example` para `.env` e preencha as variáveis.
-3. Use uma `USER_SESSION_STRING` exclusiva para este serviço.
-4. Instale: `pip install -r requirements.txt`.
-5. Execute: `python app.py`.
-6. No privado do bot de controle, envie `/observador`.
+A função nasce desligada. Para ligá-la, são obrigatórios:
 
-No Railway, use `python app.py` como comando inicial e cadastre as mesmas
-variáveis. Apenas o `ADMIN_USER_ID` consegue abrir o painel.
+- `BOTSON_PREVIEW_ALLOWLIST`;
+- `BOTSON_CONTROLLER_ID`, ou `BOTSON_PAIR_CODE` para pareamento;
+- a mesma `USER_SESSION_STRING` exclusiva usada pela coluna central.
 
-## Fluxo de origem do PV
+O teste mantém as salvaguardas do runner:
 
-Quando alguém responde ou menciona a conta em um grupo, a célula registra uma
-interação por sete dias. Se a mesma pessoa chamar no privado nesse período, o
-PV recebe internamente a origem provável e aparece em **Origens PV** no painel.
-Nenhuma mensagem é enviada à pessoa.
+- só opera nas prévias da allowlist;
+- bloqueia compra, PIX, assinatura, cancelamento e ações de moderação;
+- não abre URLs externas;
+- clica apenas callbacks classificados como navegação segura;
+- limita profundidade e quantidade de cliques;
+- termina testando saída, recebimento do link real de recuperação no PV e
+  reentrada/pedido de entrada;
+- persiste relatório e histórico de efeitos no PostgreSQL.
 
-## Regra obrigatória de linguagem
+## Instalação local
 
-Toda mensagem destinada a membros, leads ou contatos deve parecer conversa
-nativa de chat: frases curtas, abreviações naturais (`vc`, `q`, `pq`, `tb`,
-`tô`, `blz`) e pequenas variações de ritmo. Não usar texto formal, perfeito ou
-com cara de atendimento automático. Não exagerar nos erros nem repetir sempre
-as mesmas abreviações. Textos técnicos do painel administrativo não seguem
-essa regra.
+1. Copie `.env.example` para `.env` e preencha o painel/PostgreSQL.
+2. Instale `pip install -r requirements.txt`.
+3. Execute `python app.py`.
+4. Abra `/observador` no privado do bot de controle.
 
-Exemplo inadequado: `Vi que você veio pelo grupo. Vou confirmar o link correto para você.`
+No Railway, mantenha uma réplica e `restartPolicyType = NEVER`. O Dockerfile
+copia `app.py` e todo o pacote `gr_observer`.
 
-Exemplo adequado: `pera aí q vou ver o link certo p vc`
+## Sessão exclusiva e AuthKeyDuplicatedError
 
-## Estado e implantação
+O Railway pode manter o deploy anterior vivo por alguns segundos. Uma trava
+consultiva do PostgreSQL serializa a conexão: o sucessor aguarda o contêiner
+anterior desconectar e só então abre a sessão. Isso evita nova concorrência
+durante deploys.
 
-O painel inicia sem a sessão do observador; /ligar informa quando ela falta.
-Se faltar uma credencial do próprio painel, o processo termina e informa
-somente os nomes das variáveis ausentes. Use uma única réplica.
-Reinício automático está desativado: FloodWait exige revisão manual.
-O bot aceita /start e /observador somente no privado do ADMIN_USER_ID.
-As credenciais nunca devem ser commitadas. Cadastre-as em Variables no Railway.
+Essa proteção não recupera uma chave já invalidada. Quando aparecer
+`AuthKeyDuplicatedError`, gere uma nova sessão com `python generate_session.py`,
+substitua `USER_SESSION_STRING` e não reutilize o mesmo conteúdo em outro
+serviço, computador ou processo.
 
-Limitações do MVP: trechos candidatos a regras exigem leitura humana; mídia é
-uma indicação geral, sem discriminar cada formato; prévias de links não provam
-permissão de divulgação; bots vistos não revelam sua configuração interna.
-Ainda não há análise estatística da rotina, catálogo de donos/admins,
-aprovação/ignorar links nem envio de rascunhos. Origens são apenas prováveis.
-O histórico lido é limitado a 20 mensagens por chat por varredura por padrão.
-Interações, origens e rascunhos pessoais expiram em sete dias (limpeza na varredura).
+Antes de ativar **Testar BOTSON** neste monólito, desligue o serviço standalone
+que usa a mesma conta. Duas aplicações diferentes não podem compartilhar a
+StringSession.
 
-Referência: https://docs.telethon.dev/en/stable/modules/custom.html
+## Verificação
 
-## Controle administrativo
+```bash
+python -m unittest -v
+python -m py_compile app.py gr_observer/*.py gr_observer/modules/*.py
+git diff --check
+```
 
-No privado do bot, somente o ADMIN_USER_ID pode executar:
+Os testes são offline: validam os contratos, o catálogo, a passividade do
+Radar, o bloqueio de botões perigosos, a trava de sessão e as regras de
+idempotência. Não autenticam credenciais reais nem executam ações no Telegram.
 
-- `/ligar`: conecta a conta observadora e inicia a leitura.
-- `/desligar`: cancela a leitura e desconecta a conta observadora; mantém o painel online.
-- `/status`: informa o estado real e o motivo de uma pausa.
-- `/start` ou `/observador`: abre o painel com botões Ligar/Desligar.
+Veja também:
 
-O estado fica na tabela observer_control do PostgreSQL e é restaurado após
-reiniciar o serviço. A primeira instalação começa desligada. Sem
-USER_SESSION_STRING o painel funciona, mas a observação não liga.
-FloodWait pausa apenas a observação e salva a pausa; o painel segue acessível.
-Nenhum comando permite postar, entrar em grupos ou enviar mensagens pela conta.
-
-## Gerar uma sessao exclusiva no computador
-
-Instale `telethon==1.44.0` e execute `python generate_session.py` em um terminal
-interativo. O gerador usa uma StringSession vazia e pede API ID, API HASH,
-telefone, codigo de login e, quando exigida, senha de duas etapas. O codigo,
-telefone, hash e senha ficam ocultos no terminal; nao sao gravados em arquivos
-de configuracao nem incluidos no historico de comandos.
-
-No Windows, a versao 2 abre janelas de entrada com campos mascarados para hash,
-telefone, codigo e senha. Isso permite colar com Ctrl+V em uma caixa de texto
-sem depender do comportamento de `getpass` no console. Em outros sistemas,
-mantem a entrada oculta no terminal. Uma falha de formato informa apenas a
-quantidade de caracteres recebidos, nunca o conteudo. Se tkinter nao estiver
-disponivel, o gerador informa esse problema sem voltar ao campo de console.
-
-Use o ID e hash do MESMO aplicativo, obtidos em API development tools de
-https://my.telegram.org/apps. Tambem pode copiar os valores reais do servico
-de origem no Railway; expressoes `${{...}}` e tokens do BotFather nao servem.
-O gerador verifica apenas o formato localmente. A validade do par depende da
-resposta do Telegram. `ApiIdInvalidError` significa que o par foi rejeitado:
-confira ambos os valores, sem repetir com as mesmas credenciais.
-
-O arquivo `radar-gr-session.txt` so e criado apos autenticar uma conta de
-usuario. Ele fica na pasta de usuario do Windows, fora do repositorio, e nao e
-sobrescrito se ja existir. Copie seu conteudo diretamente para
-`USER_SESSION_STRING` no Railway, faca deploy e use `/ligar`. O gerador nao
-roda no Railway e nao precisa permanecer aberto. A sessao e sensivel;
-`radar-gr-session*.txt` tambem foi incluido no `.gitignore` e `.dockerignore`.
-
-Erros de autenticacao terminam com mensagem curta e a conexao e encerrada em
-`finally`. Os testes locais simulam rede e autenticacao; nao validam credenciais
-reais nem fazem login.
-
-Referencia: https://docs.telethon.dev/en/stable/basic/signing-in.html
+- [Arquitetura](docs/ARCHITECTURE.md)
+- [ADR da reorganização](docs/ADR-001-modular-monolith.md)
+- [Inventário e lacunas](docs/FEATURE-GAP.md)
+- [Plano de ativação e rollback](docs/CUTOVER.md)
