@@ -21,7 +21,7 @@ MODULES.setdefault(
         "order": 25,
         "dispatch_order": 25,
         "label": "Atendimento de Grupos",
-        "description": "Detecta pedidos allowlisted, espera 3–7 min e responde com cooldown e rastreio Grupo → PV.",
+        "description": "Responde pedidos autorizados e mantém o texto manual visível após cada 10 mensagens novas.",
         "initial_reason": "Desligado por padrão; configure GROUP_REPLY_ALLOWLIST",
         "default_enabled": False,
         "active_writes": True,
