@@ -1,21 +1,28 @@
 """Delayed, allowlisted replies to inbound group messages.
 
 The module only observes chats explicitly configured in GROUP_REPLY_ALLOWLIST.
-It queues one delayed response per matched inbound message, keeps a per-chat
-cooldown, ignores bots/self/outgoing messages, and records the interaction so
-Radar can attribute a later private message to the source group.
+Allowlist items may be Telegram chat IDs, @usernames, or private invite links.
+Private invite links are resolved at connect time when the user account is
+already a member. The module queues one delayed response per matched inbound
+message, keeps a per-chat cooldown, ignores bots/self/outgoing messages, and
+records the interaction so Radar can attribute a later private message to the
+source group.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 
 from telethon import errors, utils
+from telethon.tl.functions.messages import CheckChatInviteRequest
 
 from ..catalog import normalize_text
+
+log = logging.getLogger("gr-observer.group-reply")
 
 TRIGGERS = (
     r"\bquem\s+(?:quer|vai)\s+ver\s+(?:uma\s+)?esposa\b",
@@ -26,6 +33,10 @@ TRIGGERS = (
     r"\besposa\s+no\s+pv\b",
 )
 TRIGGER_RE = re.compile("|".join(f"(?:{item})" for item in TRIGGERS), re.I)
+INVITE_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)([A-Za-z0-9_-]+)(?:\?.*)?$",
+    re.I,
+)
 
 DEFAULT_REPLIES = (
     "chama no pv 😉", "tenho sim, chama no pv", "quer ver? chama no pv 😉",
@@ -40,6 +51,11 @@ DEFAULT_REPLIES = (
 
 def _csv(name: str) -> tuple[str, ...]:
     return tuple(x.strip() for x in os.getenv(name, "").split(",") if x.strip())
+
+
+def invite_hash(value: str) -> str | None:
+    match = INVITE_RE.match((value or "").strip())
+    return match.group(1) if match else None
 
 
 def _stable_fraction(key: str) -> float:
@@ -57,8 +73,12 @@ def _reply_for(key: str, replies: tuple[str, ...]) -> str:
     return replies[int.from_bytes(digest[:4], "big") % len(replies)]
 
 
-def _allow_tokens() -> tuple[str, ...]:
-    return tuple(normalize_text(x).lstrip("@") for x in _csv("GROUP_REPLY_ALLOWLIST"))
+def _normalized_direct_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        normalize_text(value).lstrip("@")
+        for value in values
+        if not invite_hash(value)
+    )
 
 
 class GroupReplyModule:
@@ -70,7 +90,10 @@ class GroupReplyModule:
         self.settings = settings
         self.client = None
         self.me = None
-        self.allowlist = _allow_tokens()
+        self.allowlist_raw = _csv("GROUP_REPLY_ALLOWLIST")
+        self.allowlist = _normalized_direct_tokens(self.allowlist_raw)
+        self.resolved_chat_ids: set[int] = set()
+        self.unresolved_invites: list[str] = []
         custom = _csv("GROUP_REPLY_RESPONSES")
         self.replies = custom or DEFAULT_REPLIES
         self.min_delay = max(0, int(os.getenv("GROUP_REPLY_MIN_DELAY_SECONDS", "180")))
@@ -92,19 +115,49 @@ class GroupReplyModule:
             """CREATE INDEX IF NOT EXISTS group_reply_sent_idx
                ON group_reply_events(chat_id,status,sent_at DESC)"""
         )
+        await self._resolve_invite_allowlist()
 
     async def on_disconnect(self) -> None:
         self.client = None
         self.me = None
+        self.resolved_chat_ids.clear()
+        self.unresolved_invites.clear()
+
+    async def _resolve_invite_allowlist(self) -> None:
+        self.resolved_chat_ids.clear()
+        self.unresolved_invites.clear()
+        for value in self.allowlist_raw:
+            token = invite_hash(value)
+            if not token:
+                continue
+            try:
+                result = await self.client(CheckChatInviteRequest(token))
+                chat = getattr(result, "chat", None)
+                if chat is None:
+                    self.unresolved_invites.append(value)
+                    continue
+                self.resolved_chat_ids.add(int(utils.get_peer_id(chat)))
+            except errors.FloodWaitError:
+                raise
+            except Exception as exc:
+                self.unresolved_invites.append(value)
+                log.warning("Falha ao resolver invite da allowlist: %s", type(exc).__name__)
+        log.info(
+            "Atendimento de Grupos: %s invite(s) resolvido(s), %s pendente(s)",
+            len(self.resolved_chat_ids), len(self.unresolved_invites),
+        )
 
     def register_actions(self, writer) -> None:
         writer.register(self.module_id, "send_group_reply", self.action_send_group_reply)
 
     def preview(self) -> str:
-        groups = ", ".join(self.allowlist) if self.allowlist else "nenhum"
+        invite_count = sum(1 for value in self.allowlist_raw if invite_hash(value))
         return (
             "ATENDIMENTO DE GRUPOS\n"
-            f"Grupos permitidos: {groups}\n"
+            f"Alvos configurados: {len(self.allowlist_raw)} "
+            f"({invite_count} link(s), {len(self.allowlist)} ID/@username)\n"
+            f"Links resolvidos nesta conexão: {len(self.resolved_chat_ids)}\n"
+            f"Links pendentes: {len(self.unresolved_invites)}\n"
             f"Atraso: {self.min_delay}–{self.max_delay} s\n"
             f"Cooldown por grupo: {self.cooldown} s\n"
             f"Respostas disponíveis: {len(self.replies)}\n"
@@ -112,12 +165,14 @@ class GroupReplyModule:
         )
 
     def _allowed(self, entity) -> bool:
+        chat_id_int = int(utils.get_peer_id(entity))
+        if chat_id_int in self.resolved_chat_ids:
+            return True
         if not self.allowlist:
             return False
-        chat_id = str(utils.get_peer_id(entity))
         raw_id = str(getattr(entity, "id", ""))
         username = normalize_text(getattr(entity, "username", None) or "").lstrip("@")
-        candidates = {normalize_text(chat_id), normalize_text(raw_id)}
+        candidates = {normalize_text(str(chat_id_int)), normalize_text(raw_id)}
         if username:
             candidates.add(username)
         return any(token in candidates for token in self.allowlist)
