@@ -65,6 +65,7 @@ class Observer:
         )
         self.registry.register("botson", BotsonModule(self.storage, self.settings))
         self.registry.apply_states(await self.storage.module_states())
+        await self.apply_startup_requests()
         for item in list(self.registry.enabled()):
             blocker = self.settings.module_blocker(item.module_id)
             if blocker:
@@ -81,6 +82,20 @@ class Observer:
             self.worker = asyncio.create_task(
                 self.user_runtime(), name="telegram-user-runtime"
             )
+
+    async def apply_startup_requests(self) -> None:
+        """Honor an explicit first-deploy opt-in without defeating later pauses."""
+        item = self.registry.get("pv_reply")
+        if (
+            not self.settings.pv_reply_auto_enable
+            or item.enabled
+            or item.reason != item.spec["initial_reason"]
+            or self.settings.module_blocker("pv_reply")
+        ):
+            return
+        item.enabled = True
+        item.reason = "Conectando por ativação inicial autorizada"
+        await self.storage.set_module_state(item.module_id, True, item.reason)
 
     def is_admin(self, event) -> bool:
         return bool(event.is_private and int(event.sender_id) == self.admin_id)

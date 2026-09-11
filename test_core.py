@@ -52,6 +52,7 @@ def settings(**overrides):
         history_limit=20,
         scan_interval_minutes=360,
         pv_preview_link="https://t.me/+private-test-link",
+        pv_reply_auto_enable=False,
         pv_reply_delay_seconds=60,
         pv_followup_min_hours=23.0,
         pv_followup_max_hours=25.0,
@@ -537,6 +538,27 @@ class ApplicationCoreTests(unittest.IsolatedAsyncioTestCase):
         observer = Observer.__new__(Observer)
         observer.pool = NS()
         return observer
+
+    async def test_explicit_first_deploy_opt_in_enables_pv_only_once(self):
+        observer = self.bare_observer()
+        observer.settings = settings(pv_reply_auto_enable=True)
+        observer.storage = NS(set_module_state=AsyncMock())
+        observer.registry = ModuleRegistry()
+        observer.registry.register("pv_reply", object())
+        item = observer.registry.get("pv_reply")
+        item.reason = item.spec["initial_reason"]
+
+        await observer.apply_startup_requests()
+
+        self.assertTrue(item.enabled)
+        observer.storage.set_module_state.assert_awaited_once()
+
+        item.enabled = False
+        item.reason = "Pausado pelo administrador"
+        observer.storage.set_module_state.reset_mock()
+        await observer.apply_startup_requests()
+        self.assertFalse(item.enabled)
+        observer.storage.set_module_state.assert_not_awaited()
 
     async def test_user_session_lock_is_held_until_release(self):
         observer = self.bare_observer()

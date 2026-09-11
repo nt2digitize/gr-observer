@@ -125,6 +125,7 @@ MODULES = {
         "dispatch_order": 20,
         "label": "Atendimento PV",
         "description": "Recepção em duas etapas e lembretes progressivos no privado.",
+        "initial_reason": "Desligado por padrão; requer ativação consciente",
         "default_enabled": False,
         "active_writes": True,
     },

@@ -10,6 +10,8 @@ sessão.
 - branch de homologação revisada;
 - nova StringSession gerada e nunca usada em outro processo;
 - convite da prévia cadastrado em `PV_PREVIEW_LINK` somente no Railway;
+- `PV_REPLY_AUTO_ENABLE=true` somente quando o primeiro acionamento tiver sido
+  autorizado; manter `false` nos demais ambientes;
 - allowlist BOTSON revisada;
 - controlador definido;
 - backup lógico do PostgreSQL ou snapshot disponível.
@@ -24,9 +26,10 @@ sessão.
 6. Enviar `ligar radar`; validar inventário e ausência de
    `AuthKeyDuplicatedError`.
 7. Enviar `ver mensagens pv` e conferir os textos/intervalos.
-8. Enviar `ligar atendimento`; testar com uma conta não-bot: primeiro PV,
-   resposta e recebimento do link. Para os ciclos longos, conferir
-   `next_followup_at` no banco em vez de aguardar em produção.
+8. Se a ativação inicial automática não foi autorizada, enviar
+   `ligar atendimento`. Testar com uma conta não-bot: primeiro PV, resposta e
+   recebimento do link. Para os ciclos longos, conferir `next_followup_at` no
+   banco em vez de aguardar em produção.
 9. Enviar `ligar botson`; parear se necessário.
 10. Rodar `testar botson` com uma allowlist de uma Secretaria.
 11. Conferir acesso final, Outbox e efeitos em `review`.

@@ -149,12 +149,17 @@ Configuração padrão:
 
 ```text
 PV_PREVIEW_LINK=<preencher somente no Railway>
+PV_REPLY_AUTO_ENABLE=false
 PV_REPLY_DELAY_SECONDS=60
 PV_FOLLOWUP_MIN_HOURS=23
 PV_FOLLOWUP_MAX_HOURS=25
 PV_FOLLOWUP_MAX_CYCLES=7
 PV_WEEKLY_INTERVAL_HOURS=168
 ```
+
+`PV_REPLY_AUTO_ENABLE=true` serve somente para a primeira ativação
+explicitamente autorizada. Depois que o estado for alterado no painel, um
+reinício não desfaz a pausa administrativa.
 
 ## Testar BOTSON
 

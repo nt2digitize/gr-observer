@@ -49,4 +49,6 @@
 
 - conteúdo recebido no PV não é salvo pela função;
 - convite privado fica em `PV_PREVIEW_LINK`, fora do repositório público;
-- nenhuma mensagem real, variável Railway, publicação ou deploy foi executado.
+- ativação inicial opcional por `PV_REPLY_AUTO_ENABLE`, sem sobrepor uma pausa
+  posterior feita pelo administrador;
+- credenciais, StringSession e convite privado nunca entram no repositório.

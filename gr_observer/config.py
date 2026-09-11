@@ -49,6 +49,7 @@ class Settings:
     history_limit: int
     scan_interval_minutes: int
     pv_preview_link: str
+    pv_reply_auto_enable: bool
     pv_reply_delay_seconds: int
     pv_followup_min_hours: float
     pv_followup_max_hours: float
@@ -84,6 +85,7 @@ class Settings:
                 1, int(os.getenv("SCAN_INTERVAL_MINUTES", "360"))
             ),
             pv_preview_link=os.getenv("PV_PREVIEW_LINK", "").strip(),
+            pv_reply_auto_enable=env_bool("PV_REPLY_AUTO_ENABLE", False),
             pv_reply_delay_seconds=max(
                 0, int(os.getenv("PV_REPLY_DELAY_SECONDS", "60"))
             ),

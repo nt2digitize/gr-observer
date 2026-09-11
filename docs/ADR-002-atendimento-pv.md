@@ -73,3 +73,7 @@ Desligar a costela pausa ações pendentes. Elas não são consumidas enquanto
 
 A ativação real continua bloqueada enquanto a StringSession estiver inválida e
 até `PV_PREVIEW_LINK` ser cadastrado com segurança.
+
+Para um cutover autorizado sem intervenção no painel,
+`PV_REPLY_AUTO_ENABLE=true` liga apenas uma linha ainda intocada no estado
+inicial. A flag não religa a função depois de uma pausa administrativa.
