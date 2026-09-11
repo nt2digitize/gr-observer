@@ -12,6 +12,7 @@ from telethon import errors
 from gr_observer.application import Observer
 from gr_observer.catalog import (
     BOTSON_DETAILS,
+    CAMPAIGNS,
     COMMANDS,
     MODULES,
     match_command,
@@ -22,6 +23,12 @@ from gr_observer.config import Settings
 from gr_observer.domain import source_label
 from gr_observer.modules.botson import BotsonModule
 from gr_observer.modules.botson_engine import button_policy, telegram_bot_from_url
+from gr_observer.modules.pv_reply import (
+    PvReplyModule,
+    classify_response,
+    followup_delay_seconds,
+    is_human_sender,
+)
 from gr_observer.modules.radar import RadarModule
 from gr_observer.outbox import (
     AmbiguousExternalEffect,
@@ -44,6 +51,12 @@ def settings(**overrides):
         user_session_string="session",
         history_limit=20,
         scan_interval_minutes=360,
+        pv_preview_link="https://t.me/+private-test-link",
+        pv_reply_delay_seconds=60,
+        pv_followup_min_hours=23.0,
+        pv_followup_max_hours=25.0,
+        pv_followup_max_cycles=7,
+        pv_weekly_interval_hours=168.0,
         botson_previews=("preview",),
         botson_bot_targets=(),
         botson_controller_id=123,
@@ -77,6 +90,9 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(match_command("  LIGAR   RADAR ", "panel"), "radar.enable")
         self.assertEqual(match_command("ligar botson", "panel"), "botson.enable")
         self.assertEqual(match_command("testar botson", "panel"), "botson.run")
+        self.assertEqual(
+            match_command("ligar atendimento", "panel"), "pv_reply.enable"
+        )
 
     def test_user_trigger_is_surface_scoped(self):
         self.assertEqual(match_command("testar", "user"), "botson.run")
@@ -97,6 +113,9 @@ class CatalogTests(unittest.TestCase):
             len({item["order"] for item in MODULES.values()}), len(MODULES)
         )
         self.assertEqual(
+            len({item["order"] for item in CAMPAIGNS.values()}), len(CAMPAIGNS)
+        )
+        self.assertEqual(
             len({item["order"] for item in BOTSON_DETAILS.values()}),
             len(BOTSON_DETAILS),
         )
@@ -115,6 +134,10 @@ class SettingsTests(unittest.TestCase):
         cfg = settings(botson_controller_id=None, botson_pair_code="code")
         self.assertIsNone(cfg.module_blocker("botson"))
 
+    def test_pv_reply_requires_private_preview_link(self):
+        cfg = settings(pv_preview_link="")
+        self.assertIn("PV_PREVIEW_LINK", cfg.module_blocker("pv_reply"))
+
 
 class RegistryTests(unittest.TestCase):
     def test_registry_rejects_duplicate_rib(self):
@@ -126,9 +149,11 @@ class RegistryTests(unittest.TestCase):
     def test_registry_uses_catalog_order(self):
         registry = ModuleRegistry()
         registry.register("botson", object())
+        registry.register("pv_reply", object())
         registry.register("radar", object())
         self.assertEqual(
-            [item.module_id for item in registry.ordered()], ["radar", "botson"]
+            [item.module_id for item in registry.ordered()],
+            ["radar", "pv_reply", "botson"],
         )
 
     def test_state_is_per_module(self):
@@ -222,6 +247,113 @@ class RadarTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(node.func.attr, forbidden_attributes)
             if isinstance(node, ast.Name):
                 self.assertNotIn(node.id, forbidden_names)
+
+
+class PvReplyTests(unittest.IsolatedAsyncioTestCase):
+    def module(self, **overrides):
+        storage = NS(
+            accept_pv_message=AsyncMock(return_value="greeting_queued"),
+            pv_action_allowed=AsyncMock(return_value=True),
+            pv_reminder_link_allowed=AsyncMock(return_value=True),
+            mark_pv_greeting_sent=AsyncMock(return_value=True),
+            mark_pv_link_sent_and_schedule=AsyncMock(return_value=True),
+            complete_pv_followup_and_schedule_next=AsyncMock(return_value=True),
+            complete_pv_weekly_and_schedule_next=AsyncMock(return_value=True),
+        )
+        module = PvReplyModule(storage, settings(**overrides))
+        module.me = NS(id=999)
+        return module, storage
+
+    def test_human_filter_excludes_bots_deleted_and_telegram_service(self):
+        self.assertTrue(is_human_sender(NS(id=10, bot=False, deleted=False)))
+        self.assertFalse(is_human_sender(NS(id=10, bot=True, deleted=False)))
+        self.assertFalse(is_human_sender(NS(id=10, bot=False, deleted=True)))
+        self.assertFalse(is_human_sender(NS(id=777000, bot=False, deleted=False)))
+
+    def test_weekly_answers_and_opt_out_are_classified(self):
+        self.assertEqual(classify_response("Sim, já entrei e gostei"), "positive")
+        self.assertEqual(classify_response("Ainda não entrei"), "negative")
+        self.assertEqual(classify_response("não gostei"), "unknown")
+        self.assertEqual(classify_response("pare, não me mande mais"), "opt_out")
+        self.assertEqual(classify_response("parece interessante"), "unknown")
+        self.assertEqual(classify_response("uma pergunta comum"), "unknown")
+
+    def test_progressive_delays_stay_inside_the_requested_windows(self):
+        one = followup_delay_seconds(42, 1, 23, 25)
+        two = followup_delay_seconds(42, 2, 23, 25)
+        three = followup_delay_seconds(42, 3, 23, 25)
+        seven = followup_delay_seconds(42, 7, 23, 25)
+        self.assertTrue(23 * 3600 <= one <= 25 * 3600)
+        self.assertTrue(47 * 3600 <= two <= 49 * 3600)
+        self.assertTrue(71 * 3600 <= three <= 73 * 3600)
+        self.assertTrue(167 * 3600 <= seven <= 169 * 3600)
+        self.assertEqual(one, followup_delay_seconds(42, 1, 23, 25))
+
+    async def test_real_private_message_is_queued_without_raw_text(self):
+        module, storage = self.module()
+        event = NS(
+            is_private=True,
+            out=False,
+            chat_id=10,
+            sender_id=10,
+            id=7,
+            raw_text="mensagem privada que não deve ser persistida",
+            get_sender=AsyncMock(
+                return_value=NS(
+                    id=10,
+                    bot=False,
+                    deleted=False,
+                    support=False,
+                    username="pessoa",
+                    first_name="Pessoa",
+                    last_name="Real",
+                )
+            ),
+        )
+        self.assertFalse(await module.handle_event(event))
+        kwargs = storage.accept_pv_message.call_args.kwargs
+        self.assertEqual(kwargs["response_kind"], "unknown")
+        self.assertEqual(kwargs["delay_seconds"], 60)
+        self.assertNotIn(event.raw_text, repr(kwargs))
+
+    async def test_bot_private_message_is_ignored(self):
+        module, storage = self.module()
+        event = NS(
+            is_private=True,
+            out=False,
+            get_sender=AsyncMock(return_value=NS(id=10, bot=True)),
+        )
+        self.assertFalse(await module.handle_event(event))
+        storage.accept_pv_message.assert_not_awaited()
+
+    async def test_link_starts_progressive_phase_then_weekly_mode(self):
+        module, storage = self.module()
+        effects = NS(send_text=AsyncMock(return_value={"message_id": 8}))
+        action = {
+            "action_key": "pv-link",
+            "payload": {"peer": 10, "campaign_id": "pv.preview_link"},
+        }
+        result = await module.action_send_link(action, effects)
+        self.assertTrue(result["sent"])
+        call = storage.mark_pv_link_sent_and_schedule.call_args.kwargs
+        self.assertTrue(23 * 3600 <= call["delay_seconds"] <= 25 * 3600)
+        self.assertEqual(call["weekly_delay_seconds"], 7 * 24 * 3600)
+        self.assertEqual(call["max_cycles"], 7)
+
+    async def test_weekly_question_has_no_link_and_schedules_one_week(self):
+        module, storage = self.module()
+        effects = NS(send_text=AsyncMock(return_value={"message_id": 9}))
+        action = {
+            "action_key": "weekly-1",
+            "payload": {"peer": 10, "campaign_id": "pv.weekly_question", "cycle": 1},
+        }
+        result = await module.action_send_weekly_question(action, effects)
+        self.assertTrue(result["sent"])
+        sent_text = effects.send_text.call_args.args[1]
+        self.assertNotIn("https://", sent_text)
+        self.assertIn("Já entrou", sent_text)
+        call = storage.complete_pv_weekly_and_schedule_next.call_args.kwargs
+        self.assertEqual(call["delay_seconds"], 7 * 24 * 3600)
 
 
 class OutboxTests(unittest.IsolatedAsyncioTestCase):
@@ -445,8 +577,10 @@ class ApplicationCoreTests(unittest.IsolatedAsyncioTestCase):
             "outbox_actions",
             "telegram_effects",
             "module_runs",
+            "pv_reply_contacts",
         ):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", SCHEMA)
+        self.assertIn("available_at TIMESTAMPTZ", SCHEMA)
 
     async def test_operational_command_does_not_leak_into_radar(self):
         observer = self.bare_observer()
@@ -464,6 +598,35 @@ class ApplicationCoreTests(unittest.IsolatedAsyncioTestCase):
 
         botson_impl.handle_event.assert_awaited_once()
         radar_impl.handle_event.assert_not_awaited()
+
+    async def test_private_business_event_reaches_pv_and_radar_in_order(self):
+        observer = self.bare_observer()
+        calls = []
+
+        async def botson(_event):
+            calls.append("botson")
+            return False
+
+        async def pv_reply(_event):
+            calls.append("pv_reply")
+            return False
+
+        async def radar(_event):
+            calls.append("radar")
+            return False
+
+        observer.registry = ModuleRegistry()
+        observer.registry.register("radar", NS(handle_event=radar))
+        observer.registry.register("pv_reply", NS(handle_event=pv_reply))
+        observer.registry.register("botson", NS(handle_event=botson))
+        for item in observer.registry.ordered():
+            item.enabled = True
+        observer.connected_modules = {"radar", "pv_reply", "botson"}
+        observer.active_events = set()
+
+        await observer.guarded_dispatch(NS())
+
+        self.assertEqual(calls, ["botson", "pv_reply", "radar"])
 
 
 if __name__ == "__main__":

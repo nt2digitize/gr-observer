@@ -27,3 +27,26 @@
 - callbacks de resultado incerto não são repetidos automaticamente;
 - a função BOTSON nasce desligada e exige allowlist mais controlador/pareamento;
 - operações de pagamento, compra, assinatura e moderação continuam bloqueadas.
+
+## Não lançado — Atendimento PV
+
+### Adicionado
+
+- costela `pv_reply`, desligada por padrão e controlável por
+  `ligar/desligar atendimento`;
+- textos ordenados em `CAMPAIGNS` e prévia administrativa por
+  `ver mensagens pv`;
+- duas mensagens iniciais com atraso: cumprimento e link somente após a
+  resposta seguinte;
+- intervalos determinísticos de aproximadamente 1, 2, 3, 4, 5, 6 e 7 dias;
+- após atingir sete dias, pergunta semanal sem link; resposta positiva encerra
+  em silêncio e negativa recebe o link;
+- opt-out, filtro de contas marcadas como bot e estado persistente por contato;
+- agendamento durável por `outbox_actions.available_at` e estado em
+  `pv_reply_contacts`.
+
+### Privacidade e operação
+
+- conteúdo recebido no PV não é salvo pela função;
+- convite privado fica em `PV_PREVIEW_LINK`, fora do repositório público;
+- nenhuma mensagem real, variável Railway, publicação ou deploy foi executado.

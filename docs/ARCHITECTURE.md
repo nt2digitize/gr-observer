@@ -7,7 +7,8 @@ flowchart TB
     P["Bot de controle"] --> S["Coluna central\nregistro + sessão única"]
     U["Eventos da conta"] --> S
     S --> R["Costela 1\nRadar passivo"]
-    S --> B["Costela 2\nTestar BOTSON"]
+    S --> V["Costela 2\nAtendimento PV"]
+    S --> B["Costela 3\nTestar BOTSON"]
     S --> D["PostgreSQL\nInbox + Outbox + estado"]
     D --> W["Writer único"]
     W --> T["Telegram"]
@@ -20,6 +21,7 @@ despacho de eventos. Uma costela conhece apenas seu próprio caso de uso:
 |---|---:|---:|---:|
 | Coluna central | sim | estado operacional | somente conexão |
 | Radar | sim | sim | não |
+| Atendimento PV | eventos privados | via contrato | somente pelo Writer |
 | Testar BOTSON | sim | via contrato | somente pelo Writer |
 | Painel | não pela conta | sim | responde pelo bot de controle |
 | Writer | não decide regra | diário de efeitos | sim, serialmente |
@@ -29,14 +31,15 @@ autoritativo: se ela falhar, `status` consulta novamente o PostgreSQL.
 
 ## Ordem e isolamento
 
-`MODULES` e `COMMANDS`, em `gr_observer/catalog.py`, são dicionários cuja ordem
-é explícita. IDs como `radar.enable` e `botson.run` são contratos; o texto pode
-ganhar aliases sem alterar a operação.
+`MODULES`, `COMMANDS` e `CAMPAIGNS`, em `gr_observer/catalog.py`, são
+dicionários cuja ordem é explícita. IDs como `radar.enable`, `pv.greeting` e
+`botson.run` são contratos; o texto pode ganhar aliases sem alterar a operação.
 
-No fluxo de eventos da conta, comandos operacionais são avaliados antes da
-observação passiva. Um comando consumido pelo BOTSON não vira falsa origem de
-PV no Radar. Eventos normais seguem para o Radar. Não existe chamada direta de
-uma costela para a outra.
+No fluxo de eventos da conta, a ordem de despacho também vem do catálogo:
+BOTSON (comandos), Atendimento PV e Radar. Um comando consumido pelo BOTSON não
+vira atendimento nem falsa origem no Radar. Um PV comum passa pelo Atendimento
+e ainda chega ao Radar para eventual origem provável. Não existe chamada
+direta de uma costela para a outra.
 
 ## Dual Write
 
@@ -58,6 +61,7 @@ Propriedades:
 
 - `inbox_events` elimina repetição do mesmo update;
 - `outbox_actions.action_key` elimina repetição da mesma intenção;
+- `outbox_actions.available_at` mantém atrasos e agenda semanal no banco;
 - só há um `OutboxWriter` por sessão;
 - `telegram_effects.effect_key` registra cada efeito antes da chamada externa;
 - texto usa `random_id` determinístico aceito pela API do Telegram;
@@ -66,10 +70,30 @@ Propriedades:
 - processos interrompidos movem ações/efeitos para `review` após o novo processo
   obter a trava exclusiva da sessão;
 - resultado de teste + intenção de entregar relatório são uma transação única.
+- cada avanço do Atendimento PV atualiza seu estado e cria a próxima intenção
+  agendada na mesma transação; o envio usa o mesmo diário de efeitos.
 
 Isso não promete “exactly once” mágico entre PostgreSQL e Telegram. O contrato
 é: deduplicar onde existe chave/idempotência, reconciliar onde o estado pode ser
 lido e exigir revisão onde o efeito externo ficou ambíguo.
+
+## Estado do Atendimento PV
+
+```mermaid
+stateDiagram-v2
+    [*] --> Saudacao: primeiro PV
+    Saudacao --> Espera: envia pergunta
+    Espera --> Link: próxima resposta
+    Link --> Progressivo: envia convite
+    Progressivo --> Semanal: intervalo chega a 7 dias
+    Semanal --> Encerrado: resposta positiva ou opt-out
+    Semanal --> Semanal: negativa envia link / sem resposta aguarda próxima semana
+```
+
+O texto recebido não atravessa a fronteira de persistência. O módulo reduz a
+resposta a `unknown`, `positive`, `negative` ou `opt_out`. Essa classificação só
+controla o link e o encerramento; mensagens ambíguas não recebem resposta
+automática adicional.
 
 Referências:
 

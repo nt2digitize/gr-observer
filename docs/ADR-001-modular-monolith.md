@@ -22,6 +22,7 @@ Adotar um único deploy, uma única conexão de usuário e módulos internos
 ordenados:
 
 - `radar`: comportamento passivo existente;
+- `pv_reply`: recepção privada e agenda progressiva/semanal;
 - `botson`: comportamento de homologação allowlisted existente;
 - `application`: dona do ciclo de vida e da sessão;
 - `outbox`: única saída ativa;
@@ -52,6 +53,14 @@ cliques/profundidade foram preservados.
 O pareamento novo passa a ter PostgreSQL como fonte autoritativa. Na primeira
 execução, o módulo ainda lê o marcador antigo em Mensagens Salvas e o migra.
 
+### Atendimento PV
+
+O ato final é uma sequência iniciada somente por mensagem recebida no
+privado: pergunta inicial, link após a próxima resposta, lembretes com
+intervalos crescentes até sete dias e depois pergunta semanal. Resposta
+positiva encerra sem resposta; negativa recebe o link; opt-out encerra tudo.
+Contas marcadas como bot, apagadas, de suporte e `777000` são ignoradas.
+
 ## Dados afetados
 
 As tabelas existentes não são removidas ou renomeadas. São adicionadas:
@@ -60,7 +69,10 @@ As tabelas existentes não são removidas ou renomeadas. São adicionadas:
 - `inbox_events`;
 - `outbox_actions`;
 - `module_runs`;
-- `telegram_effects`.
+- `telegram_effects`;
+- `pv_reply_contacts`.
+
+`outbox_actions` recebe a coluna aditiva `available_at` para ações futuras.
 
 `observer_control` continua sendo atualizado junto com o estado do Radar para
 compatibilidade de rollback.
@@ -93,7 +105,7 @@ sessão nova e exclusiva deve estar apenas no monólito. Consulte `CUTOVER.md`.
 
 ## Rollback
 
-1. Desligar as duas funções no painel.
+1. Desligar as três funções no painel.
 2. Confirmar a desconexão da sessão de usuário.
 3. Reimplantar o commit anterior `65ce874`.
 4. Se necessário, restaurar `observer_control.enabled` pelo painel `/ligar`.

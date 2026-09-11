@@ -11,6 +11,7 @@ from telethon.sessions import MemorySession, StringSession
 
 from .config import Settings
 from .modules.botson import BotsonModule
+from .modules.pv_reply import PvReplyModule
 from .modules.radar import RadarModule
 from .outbox import OutboxWriter
 from .panel import ControlPanel
@@ -58,6 +59,9 @@ class Observer:
         await self.storage.initialize()
         self.registry.register(
             "radar", RadarModule(self.pool, self.settings, self.pause_module)
+        )
+        self.registry.register(
+            "pv_reply", PvReplyModule(self.storage, self.settings)
         )
         self.registry.register("botson", BotsonModule(self.storage, self.settings))
         self.registry.apply_states(await self.storage.module_states())
@@ -183,7 +187,7 @@ class Observer:
 
             # Cancel an active-writing rib at the process boundary. Any
             # interrupted effect remains in review and is not blindly replayed.
-            if module_id == "botson" and self.user is not None:
+            if item.spec["active_writes"] and self.user is not None:
                 await self.stop_worker()
                 if self.registry.enabled():
                     self.worker = asyncio.create_task(
@@ -240,19 +244,21 @@ class Observer:
         task = asyncio.current_task()
         self.active_events.add(task)
         try:
-            # Operational commands get first refusal. Consumed commands never
-            # leak into the passive origin detector.
-            botson = self.registry.get("botson")
-            if botson.enabled and "botson" in self.connected_modules:
-                if await botson.implementation.handle_event(event):
-                    return
-            radar = self.registry.get("radar")
-            if radar.enabled and "radar" in self.connected_modules:
+            # Dispatch order is data. Operational commands get first refusal;
+            # ordinary PV events can still reach both Atendimento and Radar.
+            items = sorted(
+                self.registry.enabled(),
+                key=lambda item: item.spec["dispatch_order"],
+            )
+            for item in items:
+                if item.module_id not in self.connected_modules:
+                    continue
                 try:
-                    await radar.implementation.handle_event(event)
+                    if await item.implementation.handle_event(event):
+                        return
                 except errors.FloodWaitError as exc:
                     await self.pause_module(
-                        "radar",
+                        item.module_id,
                         f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar",
                     )
         finally:
@@ -294,7 +300,10 @@ class Observer:
                 self.user,
                 module_enabled=lambda module_id: self.registry.get(module_id).enabled,
             )
-            self.registry.get("botson").implementation.register_actions(self.writer)
+            for item in self.registry.ordered():
+                register = getattr(item.implementation, "register_actions", None)
+                if register:
+                    register(self.writer)
             for item in self.registry.enabled():
                 await self._connect_module(item.module_id)
             self.writer_task = asyncio.create_task(
@@ -344,28 +353,19 @@ class Observer:
                     await self.release_user_session_lock(session_lock)
 
     def status_text(self) -> str:
-        radar = self.registry.get("radar")
-        radar_status = (
-            "LIGADO"
-            if radar.enabled and "radar" in self.connected_modules
-            else "CONECTANDO"
-            if radar.enabled
-            else "DESLIGADO"
-        )
-        botson = self.registry.get("botson")
-        botson_status = (
-            "LIGADO"
-            if botson.enabled and "botson" in self.connected_modules
-            else "CONECTANDO"
-            if botson.enabled
-            else "DESLIGADO"
-        )
+        lines = []
+        for item in self.registry.ordered():
+            status = (
+                "LIGADO"
+                if item.enabled and item.module_id in self.connected_modules
+                else "CONECTANDO"
+                if item.enabled
+                else "DESLIGADO"
+            )
+            lines.extend((f"{item.spec['label']}: {status}", item.reason))
         session_status = "online" if self.user is not None else "offline"
-        return (
-            f"Radar: {radar_status}\n{radar.reason}\n"
-            f"Testar BOTSON: {botson_status}\n{botson.reason}\n"
-            f"Sessão única: {session_status}\nPainel: online"
-        )
+        lines.extend((f"Sessão única: {session_status}", "Painel: online"))
+        return "\n".join(lines)
 
     async def show_dashboard(self, event) -> None:
         await self.control_panel.show_dashboard(event)

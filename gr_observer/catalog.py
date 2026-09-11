@@ -19,7 +19,8 @@ BRAND = {
 CATEGORIES = {
     "core": {"order": 10, "label": "Sistema"},
     "radar": {"order": 20, "label": "Radar"},
-    "botson": {"order": 30, "label": "Testar BOTSON"},
+    "pv_reply": {"order": 30, "label": "Atendimento PV"},
+    "botson": {"order": 40, "label": "Testar BOTSON"},
 }
 
 DIALOGS = {
@@ -35,20 +36,101 @@ DIALOGS = {
     "botson.not_found": "Secretaria não encontrada.",
 }
 
-# Reserved for future message sequences. Keeping the namespace explicit avoids
-# scattering campaign copy through business code when active outreach exists.
-CAMPAIGNS: dict[str, dict] = {}
+# Text is centralized here; the private invite itself stays in Railway's
+# ``PV_PREVIEW_LINK`` variable and is never committed to the public repository.
+CAMPAIGNS = {
+    "pv.greeting": {
+        "order": 10,
+        "module": "pv_reply",
+        "text": "Oi 😊 Tudo bem? Quer ver a esposa?",
+    },
+    "pv.preview_link": {
+        "order": 20,
+        "module": "pv_reply",
+        "text": (
+            "Se quiser ver mais, entre no canal de prévias 😊\n"
+            "{preview_link}"
+        ),
+    },
+    "pv.followup": {
+        "order": 30,
+        "module": "pv_reply",
+        "text": (
+            "Gostou? Já entrou no canal de prévias? 😊\n"
+            "{preview_link}"
+        ),
+    },
+    "pv.weekly_question": {
+        "order": 40,
+        "module": "pv_reply",
+        "text": "Oi 😊 Já entrou no canal de prévias? Gostou?",
+    },
+}
+
+# Order matters: opt-out must win over a generic negative answer.
+PV_RESPONSE_RULES = {
+    "opt_out": {
+        "order": 10,
+        "exact": ("pare", "parar", "stop"),
+        "contains": (
+            "não quero",
+            "nao quero",
+            "não envie",
+            "nao envie",
+            "não me mande",
+            "nao me mande",
+        ),
+    },
+    "negative": {
+        "order": 20,
+        "exact": ("não", "nao", "ainda não", "ainda nao"),
+        "contains": (
+            "não entrei",
+            "nao entrei",
+            "não consegui entrar",
+            "nao consegui entrar",
+            "manda o link",
+            "mande o link",
+            "qual o link",
+            "cadê o link",
+            "cade o link",
+        ),
+    },
+    "positive": {
+        "order": 30,
+        "exact": ("sim", "entrei", "gostei"),
+        "contains": (
+            "já entrei",
+            "ja entrei",
+            "já estou",
+            "ja estou",
+            "estou no canal",
+            "tô no canal",
+            "to no canal",
+        ),
+    },
+}
 
 MODULES = {
     "radar": {
         "order": 10,
+        "dispatch_order": 30,
         "label": "Radar",
         "description": "Inventário passivo, regras, permissões, bots, links e origem provável de PV.",
         "default_enabled": False,
         "active_writes": False,
     },
-    "botson": {
+    "pv_reply": {
         "order": 20,
+        "dispatch_order": 20,
+        "label": "Atendimento PV",
+        "description": "Recepção em duas etapas e lembretes progressivos no privado.",
+        "default_enabled": False,
+        "active_writes": True,
+    },
+    "botson": {
+        "order": 30,
+        "dispatch_order": 10,
         "label": "Testar BOTSON",
         "description": "Homologação allowlisted de acesso, jornada, conversas e evidências.",
         "default_enabled": False,
@@ -94,22 +176,43 @@ COMMANDS = {
         "triggers": ("/desligar", "desligar radar"),
         "help": "desligar Radar",
     },
-    "botson.enable": {
+    "pv_reply.enable": {
         "order": 60,
+        "module": "pv_reply",
+        "surfaces": ("panel",),
+        "triggers": ("ligar atendimento", "/ligar_atendimento"),
+        "help": "ligar atendimento automático no PV",
+    },
+    "pv_reply.disable": {
+        "order": 70,
+        "module": "pv_reply",
+        "surfaces": ("panel",),
+        "triggers": ("desligar atendimento", "/desligar_atendimento"),
+        "help": "desligar atendimento automático no PV",
+    },
+    "pv_reply.preview": {
+        "order": 80,
+        "module": "pv_reply",
+        "surfaces": ("panel",),
+        "triggers": ("ver mensagens pv", "/mensagens_pv"),
+        "help": "conferir textos e intervalos do atendimento",
+    },
+    "botson.enable": {
+        "order": 90,
         "module": "botson",
         "surfaces": ("panel",),
         "triggers": ("ligar botson",),
         "help": "habilitar o testador",
     },
     "botson.disable": {
-        "order": 70,
+        "order": 100,
         "module": "botson",
         "surfaces": ("panel",),
         "triggers": ("desligar botson",),
         "help": "desabilitar o testador",
     },
     "botson.run": {
-        "order": 80,
+        "order": 110,
         "module": "botson",
         "surfaces": ("panel", "user"),
         "triggers": ("/testar_botson", "testar botson", "testar"),
@@ -133,6 +236,8 @@ BOTSON_DETAILS = {
 
 SETTINGS = {
     "command_order": tuple(COMMANDS),
+    "campaign_order": tuple(CAMPAIGNS),
+    "pv_response_order": tuple(PV_RESPONSE_RULES),
     "botson_detail_order": tuple(BOTSON_DETAILS),
     "report_max_chars": 3600,
 }
@@ -163,6 +268,18 @@ def validate_catalog() -> None:
                         f"gatilho duplicado {key!r}: {previous} / {command_id}"
                     )
                 seen[key] = command_id
+    campaign_orders = [spec["order"] for spec in CAMPAIGNS.values()]
+    if len(campaign_orders) != len(set(campaign_orders)):
+        raise ValueError("ordem duplicada no catálogo de campanhas")
+    response_orders = [spec["order"] for spec in PV_RESPONSE_RULES.values()]
+    if len(response_orders) != len(set(response_orders)):
+        raise ValueError("ordem duplicada nas respostas do Atendimento PV")
+    module_orders = [spec["order"] for spec in MODULES.values()]
+    dispatch_orders = [spec["dispatch_order"] for spec in MODULES.values()]
+    if len(module_orders) != len(set(module_orders)):
+        raise ValueError("ordem duplicada no catálogo de módulos")
+    if len(dispatch_orders) != len(set(dispatch_orders)):
+        raise ValueError("ordem de despacho duplicada no catálogo de módulos")
 
 
 def match_command(text: str, surface: str) -> str | None:

@@ -1,14 +1,16 @@
 # GR Observer — monólito modular
 
 Um único processo administra uma única sessão de usuário do Telegram e liga
-funções independentes (“costelas”) em uma coluna central. Hoje existem duas:
+funções independentes (“costelas”) em uma coluna central. Hoje existem três:
 
 1. **Radar** — observação passiva de grupos, canais, permissões, regras, bots,
    links e origem provável de conversas privadas.
-2. **Testar BOTSON** — homologação ativa, limitada por allowlist, da jornada de
+2. **Atendimento PV** — recepção atrasada em duas mensagens, lembretes com
+   intervalos progressivos e pergunta semanal condicionada à resposta.
+3. **Testar BOTSON** — homologação ativa, limitada por allowlist, da jornada de
    acesso, botões seguros, conversas, saída e reentrada.
 
-O painel de controle continua disponível mesmo quando as duas funções estão
+O painel de controle continua disponível mesmo quando as três funções estão
 desligadas. O comando de produção permanece `python app.py`.
 
 ## Estrutura
@@ -23,14 +25,15 @@ gr_observer/
   panel.py                    bot administrativo
   modules/
     radar.py                  costela passiva
+    pv_reply.py               conversa privada e agenda semanal
     botson.py                 comandos e relatórios de homologação
     botson_engine.py          jornada de teste allowlisted
 ```
 
 O Radar não recebe o Writer e não contém chamadas para enviar mensagens,
-clicar, entrar ou sair. O BOTSON recebe um portão de efeitos e não abre outra
-`TelegramClient`. Assim as funções compartilham infraestrutura, mas não
-compartilham regra de negócio.
+clicar, entrar ou sair. Atendimento PV e BOTSON recebem um portão de efeitos e
+não abrem outra `TelegramClient`. Assim as funções compartilham infraestrutura,
+mas não compartilham regra de negócio.
 
 ## Comandos de texto
 
@@ -43,6 +46,9 @@ privado do bot de controle, apenas `ADMIN_USER_ID` pode usar:
 - `funcoes` ou `/funcoes` — funções na ordem do catálogo;
 - `ligar radar` ou `/ligar`;
 - `desligar radar` ou `/desligar`;
+- `ligar atendimento` ou `/ligar_atendimento`;
+- `desligar atendimento` ou `/desligar_atendimento`;
+- `ver mensagens pv` ou `/mensagens_pv`;
 - `ligar botson`;
 - `desligar botson`;
 - `testar botson` ou `/testar_botson` — coloca o teste na fila e entrega o
@@ -84,8 +90,9 @@ gravados na mesma transação. Isso evita “teste concluído no banco, mas rela
 esquecido” após uma queda.
 
 As tabelas aditivas são `module_control`, `inbox_events`, `outbox_actions`,
-`module_runs` e `telegram_effects`. As tabelas antigas e `observer_control`
-continuam compatíveis.
+`module_runs`, `telegram_effects` e `pv_reply_contacts`. A Outbox aceita
+`available_at`, portanto atrasos e lembretes sobrevivem a reinícios. As tabelas
+antigas e `observer_control` continuam compatíveis.
 
 ## Radar
 
@@ -109,6 +116,45 @@ Limites deliberados do Radar:
 
 Mensagens destinadas a membros devem continuar com linguagem nativa de chat.
 O texto preservado do rascunho é: `pera aí q vou ver o link certo p vc`.
+
+## Atendimento PV
+
+A função nasce desligada e exige `PV_PREVIEW_LINK` no Railway. O convite
+privado não fica no repositório público. Os textos ficam no dicionário
+`CAMPAIGNS`, em `gr_observer/catalog.py`.
+
+Fluxo:
+
+1. primeiro PV recebido de uma conta que o Telegram não marca como bot: após
+   60 segundos, envia `Oi 😊 Tudo bem? Quer ver a esposa?`;
+2. depois de qualquer resposta, envia o convite da prévia após 60 segundos;
+3. após o convite, pergunta se gostou/já entrou e inclui o link. Os intervalos
+   crescem aproximadamente de 1 até 7 dias: 23–25 h, 47–49 h, …, 167–169 h;
+4. atingido o limite, envia somente a pergunta amistosa uma vez por semana,
+   sem link;
+5. resposta positiva encerra em silêncio; resposta negativa recebe o link;
+6. `parar`, `não quero` e equivalentes encerram a sequência.
+
+O limite de sete dias vale para o intervalo entre contatos, não para a duração
+total da fase progressiva. Com os sete ciclos padrão, ela ocupa cerca de 28
+dias; depois disso, o intervalo permanece semanal.
+
+O texto recebido não é persistido pela função: ficam apenas ID do evento,
+contato, etapa e classificação mínima da resposta. Inbox/Outbox impedem que o
+mesmo update crie duas mensagens. A classificação “pessoa real” significa
+somente que o Telegram não marcou a conta como bot, excluindo também contas
+apagadas, suporte e o serviço `777000`; não é prova de identidade humana.
+
+Configuração padrão:
+
+```text
+PV_PREVIEW_LINK=<preencher somente no Railway>
+PV_REPLY_DELAY_SECONDS=60
+PV_FOLLOWUP_MIN_HOURS=23
+PV_FOLLOWUP_MAX_HOURS=25
+PV_FOLLOWUP_MAX_CYCLES=7
+PV_WEEKLY_INTERVAL_HOURS=168
+```
 
 ## Testar BOTSON
 
@@ -171,5 +217,6 @@ Veja também:
 
 - [Arquitetura](docs/ARCHITECTURE.md)
 - [ADR da reorganização](docs/ADR-001-modular-monolith.md)
+- [ADR do Atendimento PV](docs/ADR-002-atendimento-pv.md)
 - [Inventário e lacunas](docs/FEATURE-GAP.md)
 - [Plano de ativação e rollback](docs/CUTOVER.md)

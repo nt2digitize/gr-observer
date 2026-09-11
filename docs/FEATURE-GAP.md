@@ -15,6 +15,7 @@ implementado.
 | Rascunho de resposta | grava no banco; não envia | preservado |
 | Evidência por postagem manual | implementada | preservada |
 | Teste BOTSON | rodando em serviço separado | integrado como costela, desligado por padrão |
+| Atendimento automático no PV | não existia; havia apenas rascunho sem envio | implementado como costela desligada por padrão, com sequência aprovada e Outbox |
 | Saída + link de recuperação + reentrada | implementado no patch runtime do runner | incorporado ao motor da costela |
 | Relatório BOTSON | somente em memória, expira | persistido; mantém expiração lógica de consulta |
 | `telegram-inspector` | serviço sem deploy/offline | não reativado |
@@ -31,7 +32,7 @@ implementado.
 | Testar palavras proibidas em grupos reais | não de forma ativa | manter análise de regras publicadas; teste ativo só em ambiente autorizado |
 | Inferir a função de cada bot | sim, como apoio | classificador por evidência, sem alegar acesso à configuração interna |
 | Listar todos os membros | não | manter fora por privacidade, escala e FloodWait |
-| Conversar automaticamente no PV | não agora | só após política, textos aprovados, opt-out e Outbox |
+| Conversar automaticamente no PV | sim, escopo aprovado nesta mudança | recepção em duas etapas, opt-out, primeira fase progressiva até intervalo semanal e pergunta semanal condicional |
 | Determinar origem exata do PV | tecnicamente não garantível | manter “origem provável” e nível de confiança |
 | Crawler genérico permanente (`main.py`) | não como serviço separado | reaproveitar regras de navegação em testes on-demand; não abrir segunda sessão |
 | Serviço offline `telegram-inspector` | provavelmente não | remover somente depois do cutover e confirmação humana |
@@ -43,9 +44,12 @@ implementado.
    Telegram e nenhum código consegue recuperá-la.
 2. Definir/confirmar `BOTSON_PREVIEW_ALLOWLIST` e o controlador (ID ou código de
    pareamento).
-3. Escolher a janela de cutover.
-4. Desligar o runner standalone antes de colocar a sessão nova no monólito.
-5. Homologar uma Secretaria por vez e conferir o estado final de acesso.
-6. Só depois decidir se os serviços antigos podem ser arquivados/removidos.
+3. Cadastrar `PV_PREVIEW_LINK` somente nas variáveis seguras do Railway.
+4. Conferir os textos com `ver mensagens pv` antes de ligar a função.
+5. Escolher a janela de cutover.
+6. Desligar o runner standalone antes de colocar a sessão nova no monólito.
+7. Homologar o Atendimento PV com uma conta de teste e conferir os estados.
+8. Homologar uma Secretaria por vez e conferir o estado final de acesso.
+9. Só depois decidir se os serviços antigos podem ser arquivados/removidos.
 
 Nenhuma dessas decisões foi simulada ou tomada automaticamente.

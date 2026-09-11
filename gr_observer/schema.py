@@ -22,6 +22,9 @@ ON CONFLICT(module_id) DO NOTHING;
 INSERT INTO module_control(module_id, enabled, reason)
 VALUES('botson', FALSE, 'Desligado por padrão; requer homologação')
 ON CONFLICT(module_id) DO NOTHING;
+INSERT INTO module_control(module_id, enabled, reason)
+VALUES('pv_reply', FALSE, 'Desligado por padrão; requer ativação consciente')
+ON CONFLICT(module_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS chats (
   chat_id BIGINT PRIMARY KEY,
@@ -106,14 +109,44 @@ CREATE TABLE IF NOT EXISTS outbox_actions (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK(status IN ('pending','processing','succeeded','failed','review')),
   attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   lease_until TIMESTAMPTZ,
   result JSONB,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE outbox_actions
+ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS outbox_pending_idx
 ON outbox_actions(status, id);
+CREATE INDEX IF NOT EXISTS outbox_ready_idx
+ON outbox_actions(status, available_at, id);
+
+-- No incoming private-message content is stored. This state is enough to
+-- advance the two-message conversation and schedule bounded follow-ups.
+CREATE TABLE IF NOT EXISTS pv_reply_contacts (
+  user_id BIGINT PRIMARY KEY,
+  username TEXT,
+  display_name TEXT,
+  stage TEXT NOT NULL DEFAULT 'new'
+    CHECK(stage IN (
+      'new','greeting_queued','awaiting_reply','link_queued',
+      'following_up','weekly','completed','stopped'
+    )),
+  last_inbound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_inbound_message_id BIGINT,
+  greeting_queued_at TIMESTAMPTZ,
+  greeting_sent_at TIMESTAMPTZ,
+  link_queued_at TIMESTAMPTZ,
+  link_sent_at TIMESTAMPTZ,
+  followup_cycle INTEGER NOT NULL DEFAULT 0,
+  weekly_cycle INTEGER NOT NULL DEFAULT 0,
+  weekly_last_question_at TIMESTAMPTZ,
+  next_followup_at TIMESTAMPTZ,
+  stopped_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS module_runs (
   run_id TEXT PRIMARY KEY,

@@ -39,6 +39,20 @@ class ControlPanel:
             await event.respond(
                 await self.app.set_module_enabled("radar", False), parse_mode=None
             )
+        elif command_id == "pv_reply.enable":
+            await event.respond(
+                await self.app.set_module_enabled("pv_reply", True), parse_mode=None
+            )
+        elif command_id == "pv_reply.disable":
+            await event.respond(
+                await self.app.set_module_enabled("pv_reply", False), parse_mode=None
+            )
+        elif command_id == "pv_reply.preview":
+            await event.respond(
+                self.app.registry.get("pv_reply").implementation.preview(),
+                parse_mode=None,
+                link_preview=False,
+            )
         elif command_id == "botson.enable":
             await event.respond(
                 await self.app.set_module_enabled("botson", True), parse_mode=None
@@ -75,7 +89,9 @@ class ControlPanel:
             await event.answer(result[:200], alert=True)
             await self.show_dashboard(event)
             return
-        module_toggle = re.fullmatch(r"module:(radar|botson):(on|off)", data)
+        module_toggle = re.fullmatch(
+            r"module:(radar|pv_reply|botson):(on|off)", data
+        )
         if module_toggle:
             module_id, direction = module_toggle.groups()
             result = await self.app.set_module_enabled(module_id, direction == "on")
