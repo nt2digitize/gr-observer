@@ -108,7 +108,7 @@ O comportamento original foi preservado:
 
 Limites deliberados do Radar:
 
-- não entra em links ou grupos;
+- verifica convites e links públicos sem entrar em grupos;
 - não envia nem responde pela conta;
 - não clica em botões;
 - não lista todos os membros;
@@ -116,6 +116,17 @@ Limites deliberados do Radar:
 
 Mensagens destinadas a membros devem continuar com linguagem nativa de chat.
 O texto preservado do rascunho é: `pera aí q vou ver o link certo p vc`.
+
+### Organizador de grupos e canais
+
+O botão `🗂 Organizar grupos/canais` separa os destinos em: dentro e pode
+postar, dentro ainda não testado, somente leitura, falta entrar, link que não
+abre, destinos dos quais a conta saiu e itens descartados. Cada detalhe permite
+abrir no Telegram, atualizar a situação, marcar como `não serve` e restaurar.
+A verificação de convite usa apenas consulta: nunca entra nem publica.
+
+No painel e no status, cada função mostra `🟢` quando ligada, `🔴` quando
+desligada e `🟡` durante a conexão.
 
 ## Atendimento de Grupos
 

@@ -169,6 +169,9 @@ class ControlPanel:
         if data == "functions":
             await self.show_functions(event)
             return
+        if data == "organizer":
+            await self.show_organizer(event)
+            return
         if data == "command:status":
             await event.answer()
             await event.respond(
@@ -186,6 +189,42 @@ class ControlPanel:
         if data == "home":
             await self.show_dashboard(event)
             return
+        link_action = re.fullmatch(r"link:(discard|restore|refresh):(\d+)", data)
+        if link_action:
+            action, link_id = link_action.groups()
+            link_id = int(link_id)
+            if action == "refresh":
+                radar = self.app.registry.get("radar")
+                if not radar.enabled or "radar" not in self.app.connected_modules:
+                    await event.answer("Ligue o Radar para atualizar.", alert=True)
+                    return
+                result = await radar.implementation.audit_link(link_id)
+                await event.answer(f"Situação: {result}", alert=True)
+            else:
+                disposition = "discarded" if action == "discard" else "active"
+                await self.app.pool.execute(
+                    "UPDATE link_targets SET disposition=$2 WHERE id=$1",
+                    link_id,
+                    disposition,
+                )
+                await event.answer("Atualizado.", alert=True)
+            await self.show_link(event, link_id)
+            return
+        chat_action = re.fullmatch(r"chat:(discard|restore):(-?\d+)", data)
+        if chat_action:
+            action, chat_id = chat_action.groups()
+            await self.app.pool.execute(
+                "UPDATE chats SET disposition=$2 WHERE chat_id=$1",
+                int(chat_id),
+                "discarded" if action == "discard" else "active",
+            )
+            await event.answer("Atualizado.", alert=True)
+            await self.show_chat(event, int(chat_id))
+            return
+        link_detail = re.fullmatch(r"link:(\d+)", data)
+        if link_detail:
+            await self.show_link(event, int(link_detail.group(1)))
+            return
         if data in {
             "groups",
             "channels",
@@ -195,6 +234,13 @@ class ControlPanel:
             "links",
             "origins",
             "drafts",
+            "joined_postable",
+            "joined_untested",
+            "joined_readonly",
+            "missing",
+            "broken",
+            "left",
+            "discarded",
         }:
             await self.show_list(event, data, 0)
             return
@@ -202,7 +248,7 @@ class ControlPanel:
         if detail:
             await self.show_chat(event, int(detail.group(1)))
             return
-        listing = re.fullmatch(r"list:([a-z]+):(\d+)", data)
+        listing = re.fullmatch(r"list:([a-z_]+):(\d+)", data)
         if listing:
             await self.show_list(event, listing.group(1), int(listing.group(2)))
 
@@ -230,6 +276,7 @@ class ControlPanel:
             [Button.inline("👤 Origens PV", b"origins")],
             [Button.inline("📝 Rascunhos", b"drafts")],
             [Button.inline("🧩 Funções", b"functions")],
+            [Button.inline("🗂 Organizar grupos/canais", b"organizer")],
             [Button.inline("🔴 Nova live", b"live:new")],
             [Button.inline("🧪 Testar BOTSON", b"botson:run")],
             [Button.inline("▶️ Ligar observação", b"power:on")],
@@ -242,6 +289,43 @@ class ControlPanel:
                 text, buttons=buttons, parse_mode=None, link_preview=False
             )
 
+    async def show_organizer(self, event) -> None:
+        counts = await self.app.pool.fetchrow(
+            """SELECT
+               (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
+                 AND disposition='active' AND can_text IS TRUE) joined_postable,
+               (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
+                 AND disposition='active' AND can_text IS NULL) joined_untested,
+               (SELECT COUNT(*) FROM chats WHERE membership_status='joined'
+                 AND disposition='active' AND can_text IS FALSE) joined_readonly,
+               (SELECT COUNT(*) FROM link_targets WHERE disposition='active'
+                 AND access_status='not_joined') missing,
+               (SELECT COUNT(*) FROM link_targets WHERE disposition='active'
+                 AND access_status IN ('invalid','inaccessible')) broken,
+               (SELECT COUNT(*) FROM chats WHERE disposition='active'
+                 AND membership_status='left') left_total,
+               ((SELECT COUNT(*) FROM chats WHERE disposition='discarded')+
+                (SELECT COUNT(*) FROM link_targets WHERE disposition='discarded')) discarded"""
+        )
+        buttons = [
+            [Button.inline(f"✅ Dentro e pode postar ({counts['joined_postable']})", b"list:joined_postable:0")],
+            [Button.inline(f"👀 Dentro, não testado ({counts['joined_untested']})", b"list:joined_untested:0")],
+            [Button.inline(f"🚫 Dentro, somente leitura ({counts['joined_readonly']})", b"list:joined_readonly:0")],
+            [Button.inline(f"➕ Falta entrar ({counts['missing']})", b"list:missing:0")],
+            [Button.inline(f"❌ Link não abre ({counts['broken']})", b"list:broken:0")],
+            [Button.inline(f"🚪 Saí/não estou mais ({counts['left_total']})", b"list:left:0")],
+            [Button.inline(f"🗑️ Não serve/descartados ({counts['discarded']})", b"list:discarded:0")],
+            [Button.inline("↩️ Início", b"home")],
+        ]
+        text = (
+            "🗂 ORGANIZADOR DE GRUPOS E CANAIS\n\n"
+            "O Radar apenas verifica e organiza. Ele não entra nem publica automaticamente."
+        )
+        if isinstance(event, events.CallbackQuery.Event):
+            await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
+        else:
+            await event.respond(text, buttons=buttons, parse_mode=None, link_preview=False)
+
     async def show_functions(self, event) -> None:
         lines = [
             "🧩 FUNÇÕES — ESPINHA DE PEIXE",
@@ -252,7 +336,7 @@ class ControlPanel:
         buttons = []
         for item in self.app.registry.ordered():
             state = "LIGADA" if item.enabled else "DESLIGADA"
-            icon = "🟢" if item.enabled else "⚪"
+            icon = "🟢" if item.enabled else "🔴"
             lines += [
                 f"{item.spec['order']}. {icon} {item.spec['label']} — {state}",
                 item.spec["description"],
@@ -298,7 +382,72 @@ class ControlPanel:
     async def show_list(self, event, section: str, offset: int) -> None:
         limit = 8
         item_buttons = []
-        if section == "bots":
+        organizer_chat_where = {
+            "joined_postable": "membership_status='joined' AND disposition='active' AND can_text IS TRUE",
+            "joined_untested": "membership_status='joined' AND disposition='active' AND can_text IS NULL",
+            "joined_readonly": "membership_status='joined' AND disposition='active' AND can_text IS FALSE",
+            "left": "membership_status='left' AND disposition='active'",
+        }
+        if section in organizer_chat_where:
+            rows = await self.app.pool.fetch(
+                f"""SELECT chat_id,title label,can_text,kind FROM chats
+                    WHERE {organizer_chat_where[section]}
+                    ORDER BY title OFFSET $1 LIMIT $2""",
+                offset,
+                limit,
+            )
+            lines = [
+                f"{'✅' if row['can_text'] else '🚫' if row['can_text'] is False else '👀'} "
+                f"{row['label']} — {row['kind']}"
+                for row in rows
+            ]
+            item_buttons = [
+                [Button.inline(row["label"][:60], f"chat:{row['chat_id']}".encode())]
+                for row in rows
+            ]
+        elif section in {"missing", "broken"}:
+            condition = (
+                "access_status='not_joined'"
+                if section == "missing"
+                else "access_status IN ('invalid','inaccessible')"
+            )
+            rows = await self.app.pool.fetch(
+                f"""SELECT id,COALESCE(title,url) label,url,access_status
+                    FROM link_targets WHERE disposition='active' AND {condition}
+                    ORDER BY first_seen DESC OFFSET $1 LIMIT $2""",
+                offset,
+                limit,
+            )
+            lines = [
+                f"{'➕' if row['access_status']=='not_joined' else '❌'} {row['label']}"
+                for row in rows
+            ]
+            item_buttons = [
+                [Button.inline(row["label"][:60], f"link:{row['id']}".encode())]
+                for row in rows
+            ]
+        elif section == "discarded":
+            chat_rows = await self.app.pool.fetch(
+                """SELECT chat_id id,title label,'chat' item_type FROM chats
+                   WHERE disposition='discarded' ORDER BY title"""
+            )
+            link_rows = await self.app.pool.fetch(
+                """SELECT id,COALESCE(title,url) label,'link' item_type FROM link_targets
+                   WHERE disposition='discarded' ORDER BY first_seen DESC"""
+            )
+            all_rows = [dict(row) for row in chat_rows] + [dict(row) for row in link_rows]
+            rows = all_rows[offset : offset + limit]
+            lines = [f"🗑️ {row['label']}" for row in rows]
+            item_buttons = [
+                [
+                    Button.inline(
+                        row["label"][:60],
+                        f"{row['item_type']}:{row['id']}".encode(),
+                    )
+                ]
+                for row in rows
+            ]
+        elif section == "bots":
             rows = await self.app.pool.fetch(
                 """SELECT COALESCE(username,display_name,'bot') label, COUNT(*) total
                    FROM observed_bots GROUP BY 1 ORDER BY total DESC OFFSET $1 LIMIT $2""",
@@ -377,7 +526,17 @@ class ControlPanel:
                 Button.inline("➡️", f"list:{section}:{offset + limit}".encode())
             )
         buttons = item_buttons + ([navigation] if navigation else [])
-        buttons.append([Button.inline("↩️ Início", b"home")])
+        organizer_sections = {
+            "joined_postable",
+            "joined_untested",
+            "joined_readonly",
+            "missing",
+            "broken",
+            "left",
+            "discarded",
+        }
+        back_target = b"organizer" if section in organizer_sections else b"home"
+        buttons.append([Button.inline("↩️ Voltar", back_target)])
         await event.edit(
             "\n\n".join(lines) if lines else DIALOGS["admin.empty_list"],
             buttons=buttons,
@@ -406,7 +565,8 @@ class ControlPanel:
             chat_id,
         )
         text = (
-            f"{row['title']}\n\nTexto: {label(row['can_text'])}\n"
+            f"{row['title']}\n\nSituação: {row['membership_status']}\n"
+            f"Classificação: {row['disposition']}\nTexto: {label(row['can_text'])}\n"
             f"Mídia (geral): {label(row['can_media'])}\n"
             f"Links/divulgação: {label(row['can_links'])}\n"
             f"Slow mode: {row['slowmode_seconds']} s\nÚltima consulta: {row['last_scanned']}\n\n"
@@ -429,7 +589,50 @@ class ControlPanel:
                     )
                 ]
             )
-        buttons.append([Button.inline("Voltar ao painel", b"home")])
+        if row["disposition"] == "discarded":
+            buttons.append(
+                [Button.inline("♻️ Restaurar", f"chat:restore:{chat_id}".encode())]
+            )
+        else:
+            buttons.append(
+                [Button.inline("🗑️ Marcar como não serve", f"chat:discard:{chat_id}".encode())]
+            )
+        buttons.append([Button.inline("↩️ Organizador", b"organizer")])
         await event.edit(
             text[:3800], buttons=buttons, parse_mode=None, link_preview=False
         )
+
+    async def show_link(self, event, link_id: int) -> None:
+        row = await self.app.pool.fetchrow(
+            "SELECT * FROM link_targets WHERE id=$1", link_id
+        )
+        if not row:
+            await event.answer("Link não encontrado", alert=True)
+            return
+        status_labels = {
+            "joined": "✅ Já estou dentro",
+            "not_joined": "➕ Falta entrar",
+            "invalid": "❌ Link inválido ou vencido",
+            "inaccessible": "⚠️ Não foi possível verificar",
+        }
+        text = (
+            f"{row['title'] or 'Link do Telegram'}\n\n"
+            f"Situação: {status_labels.get(row['access_status'], row['access_status'])}\n"
+            f"Tipo: {row['kind'] or 'a confirmar'}\n"
+            f"Última verificação: {row['last_checked'] or 'ainda não verificado'}\n"
+            f"Erro: {row['last_error'] or 'nenhum'}\n\n{row['url']}"
+        )
+        buttons = [[Button.url("Abrir no Telegram", row["url"])]]
+        buttons.append(
+            [Button.inline("🔄 Atualizar situação", f"link:refresh:{link_id}".encode())]
+        )
+        if row["disposition"] == "discarded":
+            buttons.append(
+                [Button.inline("♻️ Restaurar", f"link:restore:{link_id}".encode())]
+            )
+        else:
+            buttons.append(
+                [Button.inline("🗑️ Marcar como não serve", f"link:discard:{link_id}".encode())]
+            )
+        buttons.append([Button.inline("↩️ Organizador", b"organizer")])
+        await event.edit(text[:3800], buttons=buttons, parse_mode=None, link_preview=False)

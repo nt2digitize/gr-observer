@@ -377,7 +377,8 @@ class Observer:
                 if item.enabled
                 else "DESLIGADO"
             )
-            lines.extend((f"{item.spec['label']}: {status}", item.reason))
+            icon = "🟢" if status == "LIGADO" else "🟡" if status == "CONECTANDO" else "🔴"
+            lines.extend((f"{icon} {item.spec['label']}: {status}", item.reason))
         session_status = "online" if self.user is not None else "offline"
         lines.extend((f"Sessão única: {session_status}", "Painel: online"))
         return "\n".join(lines)

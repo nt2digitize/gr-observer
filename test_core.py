@@ -35,7 +35,7 @@ from gr_observer.modules.pv_reply import (
     is_human_sender,
     variant_for,
 )
-from gr_observer.modules.radar import RadarModule
+from gr_observer.modules.radar import RadarModule, telegram_link_target
 from gr_observer.outbox import (
     AmbiguousExternalEffect,
     OutboxWriter,
@@ -235,6 +235,22 @@ class RadarTests(unittest.IsolatedAsyncioTestCase):
         event = NS(out=False, is_group=True, is_channel=False)
         self.assertFalse(await module.record_manual_post(event))
         module.save_chat.assert_not_awaited()
+
+    def test_telegram_links_are_classified_without_joining(self):
+        self.assertEqual(
+            telegram_link_target("https://t.me/+Abc_123"),
+            ("invite", "Abc_123"),
+        )
+        self.assertEqual(
+            telegram_link_target("https://t.me/grupo_teste"),
+            ("public", "grupo_teste"),
+        )
+        self.assertIsNone(telegram_link_target("https://example.com/grupo"))
+
+    def test_schema_has_persistent_link_organizer(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS link_targets", SCHEMA)
+        self.assertIn("membership_status", SCHEMA)
+        self.assertIn("disposition", SCHEMA)
 
     def test_passive_module_has_no_telegram_writes(self):
         source = ast.parse(Path("gr_observer/modules/radar.py").read_text())

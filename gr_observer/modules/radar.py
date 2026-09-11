@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 
-from telethon import errors, functions, utils
+from telethon import errors, functions, types, utils
 
 from ..catalog import DIALOGS
 from ..domain import kind_of, now, title_of
@@ -22,6 +22,19 @@ RULE_WORDS = re.compile(
     re.I,
 )
 URL_RE = re.compile(r"(?:https?://|t\.me/|telegram\.me/)[^\s<>]+", re.I)
+TELEGRAM_LINK_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me|telegram\.me)/(?:(?:joinchat/|\+)([A-Za-z0-9_-]+)|@?([A-Za-z0-9_]{5,}))/?$",
+    re.I,
+)
+
+
+def telegram_link_target(url: str) -> tuple[str, str] | None:
+    match = TELEGRAM_LINK_RE.fullmatch(url.strip().rstrip(".,);]"))
+    if not match:
+        return None
+    if match.group(1):
+        return "invite", match.group(1)
+    return "public", match.group(2)
 
 
 class RadarModule:
@@ -71,9 +84,10 @@ class RadarModule:
     async def save_chat(self, entity, **values) -> None:
         chat_id = utils.get_peer_id(entity)
         await self.pool.execute(
-            """INSERT INTO chats(chat_id,title,username,kind,last_seen) VALUES($1,$2,$3,$4,$5)
+            """INSERT INTO chats(chat_id,title,username,kind,last_seen,membership_status)
+               VALUES($1,$2,$3,$4,$5,'joined')
                ON CONFLICT(chat_id) DO UPDATE SET
-               title=$2,username=$3,kind=$4,last_seen=$5""",
+               title=$2,username=$3,kind=$4,last_seen=$5,membership_status='joined'""",
             chat_id,
             title_of(entity),
             getattr(entity, "username", None),
@@ -172,14 +186,89 @@ class RadarModule:
 
     async def capture_links(self, chat_id, message_id, text) -> None:
         for url in URL_RE.findall(text or ""):
+            url = url.rstrip(".,);]")
             await self.pool.execute(
                 """INSERT INTO discovered_links(chat_id,message_id,url,observed_at)
                    VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING""",
                 chat_id,
                 message_id,
-                url.rstrip(".,);]"),
+                url,
                 now(),
             )
+            if telegram_link_target(url):
+                await self.pool.execute(
+                    """INSERT INTO link_targets(url,source_chat_id,first_seen)
+                       VALUES($1,$2,$3) ON CONFLICT(url) DO UPDATE SET
+                       source_chat_id=COALESCE(link_targets.source_chat_id,$2)""",
+                    url,
+                    chat_id,
+                    now(),
+                )
+
+    async def audit_link(self, link_id: int) -> str:
+        row = await self.pool.fetchrow(
+            "SELECT url FROM link_targets WHERE id=$1", link_id
+        )
+        if not row or self.client is None:
+            return "Radar desligado ou link não encontrado"
+        url = str(row["url"])
+        target = telegram_link_target(url)
+        if not target:
+            status, error = "invalid", "formato não reconhecido"
+            entity = None
+        else:
+            kind, value = target
+            entity = None
+            try:
+                if kind == "invite":
+                    invite = await self.client(
+                        functions.messages.CheckChatInviteRequest(value)
+                    )
+                    if isinstance(invite, types.ChatInviteAlready):
+                        entity = invite.chat
+                        status, error = "joined", None
+                    else:
+                        status, error = "not_joined", None
+                else:
+                    entity = await self.client.get_entity(value)
+                    status = (
+                        "not_joined" if getattr(entity, "left", False) else "joined"
+                    )
+                    error = None
+            except (errors.InviteHashExpiredError, errors.InviteHashInvalidError) as exc:
+                status, error = "invalid", type(exc).__name__
+            except errors.FloodWaitError:
+                raise
+            except Exception as exc:
+                status, error = "inaccessible", type(exc).__name__
+        target_chat_id = utils.get_peer_id(entity) if entity is not None else None
+        title = title_of(entity) if entity is not None else None
+        target_kind = kind_of(entity) if entity is not None else None
+        await self.pool.execute(
+            """UPDATE link_targets SET access_status=$2,target_chat_id=$3,
+               title=COALESCE($4,title),kind=COALESCE($5,kind),last_error=$6,
+               last_checked=$7 WHERE id=$1""",
+            link_id,
+            status,
+            target_chat_id,
+            title,
+            target_kind,
+            error,
+            now(),
+        )
+        if entity is not None and status == "joined":
+            await self.save_chat(entity)
+        return status
+
+    async def audit_pending_links(self, limit: int = 40) -> None:
+        rows = await self.pool.fetch(
+            """SELECT id FROM link_targets WHERE disposition='active'
+               ORDER BY last_checked NULLS FIRST,first_seen LIMIT $1""",
+            limit,
+        )
+        for row in rows:
+            await self.audit_link(int(row["id"]))
+            await asyncio.sleep(0.4)
 
     async def capture_bot(self, chat_id, sender, evidence) -> None:
         if not sender or not getattr(sender, "bot", False):
@@ -206,11 +295,13 @@ class RadarModule:
         )
 
     async def scan_all(self) -> None:
+        seen_chat_ids: set[int] = set()
         async for dialog in self.client.iter_dialogs():
             entity = dialog.entity
             if kind_of(entity) not in {"group", "channel"}:
                 continue
             try:
+                seen_chat_ids.add(int(utils.get_peer_id(entity)))
                 await self.save_chat(entity)
                 await self.inspect_permissions(entity)
                 await self.inspect_history(entity)
@@ -221,6 +312,14 @@ class RadarModule:
                 log.warning(
                     "Falha de leitura chat=%s erro=%s", entity.id, type(exc).__name__
                 )
+        if seen_chat_ids:
+            await self.pool.execute(
+                """UPDATE chats SET membership_status='left'
+                   WHERE membership_status='joined'
+                   AND NOT(chat_id=ANY($1::bigint[]))""",
+                list(seen_chat_ids),
+            )
+        await self.audit_pending_links()
 
     async def scan_loop(self) -> None:
         while True:

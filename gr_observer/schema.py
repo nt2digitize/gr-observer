@@ -39,6 +39,24 @@ CREATE TABLE IF NOT EXISTS chats (
   last_scanned TIMESTAMPTZ,
   last_seen TIMESTAMPTZ
 );
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS membership_status TEXT NOT NULL DEFAULT 'joined';
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS disposition TEXT NOT NULL DEFAULT 'active';
+
+CREATE TABLE IF NOT EXISTS link_targets (
+  id BIGSERIAL PRIMARY KEY,
+  url TEXT NOT NULL UNIQUE,
+  source_chat_id BIGINT,
+  target_chat_id BIGINT,
+  title TEXT,
+  kind TEXT,
+  access_status TEXT NOT NULL DEFAULT 'not_joined'
+    CHECK(access_status IN ('joined','not_joined','invalid','inaccessible')),
+  disposition TEXT NOT NULL DEFAULT 'active'
+    CHECK(disposition IN ('active','discarded')),
+  last_error TEXT,
+  first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_checked TIMESTAMPTZ
+);
 CREATE TABLE IF NOT EXISTS visible_rules (
   chat_id BIGINT NOT NULL,
   message_id BIGINT NOT NULL,
@@ -63,6 +81,11 @@ CREATE TABLE IF NOT EXISTS discovered_links (
   status TEXT NOT NULL DEFAULT 'pending',
   PRIMARY KEY(chat_id, message_id, url)
 );
+INSERT INTO link_targets(url,source_chat_id,first_seen)
+SELECT DISTINCT ON (url) url,chat_id,observed_at FROM discovered_links
+WHERE url ~* '^(https?://)?(t\\.me|telegram\\.me)/'
+ORDER BY url,observed_at
+ON CONFLICT(url) DO NOTHING;
 CREATE TABLE IF NOT EXISTS group_interactions (
   user_id BIGINT NOT NULL,
   chat_id BIGINT NOT NULL,
