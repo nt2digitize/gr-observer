@@ -9,14 +9,13 @@ Radar can attribute a later private message to the source group.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
-from datetime import datetime, timezone
 
 from telethon import errors, utils
 
 from ..catalog import normalize_text
-
 
 TRIGGERS = (
     r"\bquem\s+(?:quer|vai)\s+ver\s+(?:uma\s+)?esposa\b",
@@ -29,26 +28,13 @@ TRIGGERS = (
 TRIGGER_RE = re.compile("|".join(f"(?:{item})" for item in TRIGGERS), re.I)
 
 DEFAULT_REPLIES = (
-    "chama no pv 😉",
-    "tenho sim, chama no pv",
-    "quer ver? chama no pv 😉",
-    "aqui tem 😏 chama no pv",
-    "chama no privado q te mostro",
-    "tem esposa sim 😉 pv",
-    "quer conhecer? chama no pv",
-    "pv aberto 😉",
-    "chama aí no pv",
-    "tenho uma pra te mostrar 😏",
-    "vem no pv 😉",
-    "quer ver a minha? chama no pv",
-    "chama no privado 😉",
-    "no pv eu te mostro",
-    "a minha aparece no pv 😏",
-    "tem sim, chama aí",
-    "quer uma esposa? pv 😉",
-    "chega no pv",
-    "manda um oi no pv 😉",
-    "chama q eu te mostro 😏",
+    "chama no pv 😉", "tenho sim, chama no pv", "quer ver? chama no pv 😉",
+    "aqui tem 😏 chama no pv", "chama no privado q te mostro", "tem esposa sim 😉 pv",
+    "quer conhecer? chama no pv", "pv aberto 😉", "chama aí no pv",
+    "tenho uma pra te mostrar 😏", "vem no pv 😉", "quer ver a minha? chama no pv",
+    "chama no privado 😉", "no pv eu te mostro", "a minha aparece no pv 😏",
+    "tem sim, chama aí", "quer uma esposa? pv 😉", "chega no pv",
+    "manda um oi no pv 😉", "chama q eu te mostro 😏",
 )
 
 
@@ -94,6 +80,18 @@ class GroupReplyModule:
     async def on_connect(self, client, me) -> None:
         self.client = client
         self.me = me
+        await self.pool.execute(
+            """CREATE TABLE IF NOT EXISTS group_reply_events (
+                   chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL,
+                   user_id BIGINT NOT NULL, matched_text TEXT, reply_text TEXT,
+                   status TEXT NOT NULL DEFAULT 'queued', outbound_message_id BIGINT,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), sent_at TIMESTAMPTZ,
+                   PRIMARY KEY(chat_id,message_id))"""
+        )
+        await self.pool.execute(
+            """CREATE INDEX IF NOT EXISTS group_reply_sent_idx
+               ON group_reply_events(chat_id,status,sent_at DESC)"""
+        )
 
     async def on_disconnect(self) -> None:
         self.client = None
@@ -128,8 +126,7 @@ class GroupReplyModule:
         slowmode = 0
         try:
             permissions = await self.client.get_permissions(entity, self.me)
-            banned = getattr(permissions, "is_banned", False)
-            if banned:
+            if getattr(permissions, "is_banned", False):
                 return False, slowmode
         except errors.FloodWaitError:
             raise
@@ -174,68 +171,43 @@ class GroupReplyModule:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 inserted = await conn.fetchval(
-                    """INSERT INTO group_reply_events(
-                           chat_id,message_id,user_id,matched_text,status,created_at)
+                    """INSERT INTO group_reply_events(chat_id,message_id,user_id,matched_text,status,created_at)
                        VALUES($1,$2,$3,$4,'queued',NOW())
-                       ON CONFLICT(chat_id,message_id) DO NOTHING
-                       RETURNING message_id""",
-                    chat_id,
-                    int(event.id),
-                    sender_id,
-                    text[:500],
+                       ON CONFLICT(chat_id,message_id) DO NOTHING RETURNING message_id""",
+                    chat_id, int(event.id), sender_id, text[:500],
                 )
                 if inserted is None:
                     return False
                 recent = await conn.fetchval(
-                    """SELECT EXISTS(
-                           SELECT 1 FROM group_reply_events
-                           WHERE chat_id=$1 AND status='sent'
-                             AND sent_at > NOW() - ($2 * INTERVAL '1 second')
-                       )""",
-                    chat_id,
-                    self.cooldown,
+                    """SELECT EXISTS(SELECT 1 FROM group_reply_events
+                       WHERE chat_id=$1 AND status='sent'
+                       AND sent_at > NOW() - ($2 * INTERVAL '1 second'))""",
+                    chat_id, self.cooldown,
                 )
                 if recent:
                     await conn.execute(
                         "UPDATE group_reply_events SET status='cooldown' WHERE chat_id=$1 AND message_id=$2",
-                        chat_id,
-                        int(event.id),
+                        chat_id, int(event.id),
                     )
                     return False
                 await conn.execute(
                     """INSERT INTO inbox_events(source,event_key,module_id,payload)
-                       VALUES('telegram-user',$1,$2,$3::jsonb)
-                       ON CONFLICT DO NOTHING""",
-                    event_key,
-                    self.module_id,
-                    "{}",
+                       VALUES('telegram-user',$1,$2,$3::jsonb) ON CONFLICT DO NOTHING""",
+                    event_key, self.module_id, "{}",
                 )
                 await conn.execute(
-                    """INSERT INTO outbox_actions(
-                           action_key,module_id,action_type,payload,available_at)
+                    """INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
                        VALUES($1,$2,'send_group_reply',$3::jsonb,NOW()+($4 * INTERVAL '1 second'))
                        ON CONFLICT(action_key) DO NOTHING""",
-                    f"group-reply:{event_key}",
-                    self.module_id,
-                    __import__("json").dumps(
-                        {
-                            "peer": chat_id,
-                            "source_message_id": int(event.id),
-                            "source_user_id": sender_id,
-                            "text": reply,
-                        },
-                        ensure_ascii=False,
-                    ),
+                    f"group-reply:{event_key}", self.module_id,
+                    json.dumps({"peer": chat_id, "source_message_id": int(event.id),
+                                "source_user_id": sender_id, "text": reply}, ensure_ascii=False),
                     delay,
                 )
                 await conn.execute(
-                    """INSERT INTO group_interactions(
-                           user_id,chat_id,message_id,interaction_type,observed_at)
-                       VALUES($1,$2,$3,'group_reply_trigger',NOW())
-                       ON CONFLICT DO NOTHING""",
-                    sender_id,
-                    chat_id,
-                    int(event.id),
+                    """INSERT INTO group_interactions(user_id,chat_id,message_id,interaction_type,observed_at)
+                       VALUES($1,$2,$3,'group_reply_trigger',NOW()) ON CONFLICT DO NOTHING""",
+                    sender_id, chat_id, int(event.id),
                 )
         return False
 
@@ -243,46 +215,28 @@ class GroupReplyModule:
         payload = action["payload"]
         chat_id = int(payload["peer"])
         source_message_id = int(payload["source_message_id"])
-
         row = await self.pool.fetchrow(
             "SELECT status FROM group_reply_events WHERE chat_id=$1 AND message_id=$2",
-            chat_id,
-            source_message_id,
+            chat_id, source_message_id,
         )
         if not row or row["status"] != "queued":
             return {"sent": False, "reason": "state_changed"}
-
-        # Re-check the chat cooldown at execution time because multiple matches
-        # may have been queued before the first delayed reply was actually sent.
         recent = await self.pool.fetchval(
-            """SELECT EXISTS(
-                   SELECT 1 FROM group_reply_events
-                   WHERE chat_id=$1 AND status='sent'
-                     AND sent_at > NOW() - ($2 * INTERVAL '1 second')
-               )""",
-            chat_id,
-            self.cooldown,
+            """SELECT EXISTS(SELECT 1 FROM group_reply_events
+               WHERE chat_id=$1 AND status='sent'
+               AND sent_at > NOW() - ($2 * INTERVAL '1 second'))""",
+            chat_id, self.cooldown,
         )
         if recent:
             await self.pool.execute(
                 "UPDATE group_reply_events SET status='cooldown' WHERE chat_id=$1 AND message_id=$2",
-                chat_id,
-                source_message_id,
+                chat_id, source_message_id,
             )
             return {"sent": False, "reason": "cooldown"}
-
-        result = await effects.send_text(
-            chat_id,
-            payload["text"],
-            f"{action['action_key']}:send",
-        )
+        result = await effects.send_text(chat_id, payload["text"], f"{action['action_key']}:send")
         await self.pool.execute(
-            """UPDATE group_reply_events
-               SET status='sent', reply_text=$3, sent_at=NOW(), outbound_message_id=$4
+            """UPDATE group_reply_events SET status='sent',reply_text=$3,sent_at=NOW(),outbound_message_id=$4
                WHERE chat_id=$1 AND message_id=$2""",
-            chat_id,
-            source_message_id,
-            payload["text"],
-            result.get("message_id"),
+            chat_id, source_message_id, payload["text"], result.get("message_id"),
         )
         return {"sent": True, **result}
