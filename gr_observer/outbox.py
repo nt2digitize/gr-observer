@@ -19,9 +19,48 @@ USER_ACTION_MIN_INTERVAL_SECONDS = 20.0
 USER_WRITE_MIN_INTERVAL_SECONDS = 3.0
 FLOOD_WAIT_BUFFER_SECONDS = 5
 
+# A 4xx RPC response is a conclusive rejection of that invocation. It must not
+# be confused with a timeout/disconnect where Telegram may already have applied
+# the mutation. FloodWait is handled separately and retried after Telegram's
+# own wait window.
+DEFINITIVE_RPC_ERRORS = (
+    errors.BadRequestError,
+    errors.UnauthorizedError,
+    errors.ForbiddenError,
+    errors.NotFoundError,
+)
+_EFFECT_OUTCOME_KEY = "_effect_outcome"
+_EFFECT_REJECTED = "rejected"
+
 
 class AmbiguousExternalEffect(RuntimeError):
     pass
+
+
+class DefinitiveExternalEffectError(RuntimeError):
+    """The operation is known not to have produced the requested mutation."""
+
+
+def action_lane(action: dict[str, Any]) -> str:
+    """Return the logical conversation lane without creating another module.
+
+    ``pv_reply`` remains one architectural rib. Each peer is only a logical
+    sub-lane inside that rib, so waiting/failure/review for one peer cannot own
+    the global writer or become a process-wide lock.
+    """
+    module_id = str(action.get("module_id") or "unknown")
+    payload = action.get("payload") or {}
+    if module_id == "pv_reply" and payload.get("peer") is not None:
+        return f"pv:{payload['peer']}"
+    return module_id
+
+
+def _rejection_result(exc: BaseException) -> dict[str, Any]:
+    return {
+        _EFFECT_OUTCOME_KEY: _EFFECT_REJECTED,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:500],
+    }
 
 
 def stable_random_id(effect_key: str) -> int:
@@ -97,6 +136,17 @@ class TelegramEffects:
             payload=payload,
         )
         if decision == "succeeded":
+            # Storage currently has one terminal resolved state. A conclusive
+            # rejection is recorded in the result so it stays idempotent but
+            # can never be mistaken for a delivered Telegram mutation.
+            if (
+                isinstance(previous, dict)
+                and previous.get(_EFFECT_OUTCOME_KEY) == _EFFECT_REJECTED
+            ):
+                raise DefinitiveExternalEffectError(
+                    f"efeito {effect_key} já foi rejeitado: "
+                    f"{previous.get('error_type', 'erro')} {previous.get('error', '')}"
+                )
             return previous
         if decision == "ambiguous":
             reconciled = await reconcile() if reconcile else None
@@ -122,9 +172,23 @@ class TelegramEffects:
                     effect_key,
                 )
                 await asyncio.sleep(wait_seconds)
+            except DefinitiveExternalEffectError as exc:
+                # Deterministic local validation failed before a Telegram
+                # mutation could be issued. Resolve the journal entry and fail
+                # only this action/lane; do not quarantine it as ambiguous.
+                await self.storage.finish_effect(effect_key, _rejection_result(exc))
+                raise
+            except DEFINITIVE_RPC_ERRORS as exc:
+                # Telegram returned a concrete 4xx RPC rejection. This call is
+                # known to have failed, therefore review would be incorrect.
+                await self.storage.finish_effect(effect_key, _rejection_result(exc))
+                raise DefinitiveExternalEffectError(
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
             except BaseException as exc:
-                # A timeout can occur after Telegram accepted the operation. Never
-                # assume failure and repeat an active write blindly.
+                # Timeout, disconnect, cancellation or server-side uncertainty
+                # may happen after Telegram accepted a mutation. Only this
+                # genuinely uncertain class belongs in review.
                 await self.storage.review_effect(effect_key, exc)
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -266,14 +330,18 @@ class TelegramEffects:
             )
             source_media = getattr(source_message, "media", None)
             if source_message is None or source_media is None:
-                raise ValueError("mídia cadastrada não encontrada no Telegram")
+                raise DefinitiveExternalEffectError(
+                    "mídia cadastrada não encontrada no Telegram"
+                )
 
             input_peer = await self.client.get_input_entity(destination_peer)
 
             def build_media(ttl: int | None):
                 media = utils.get_input_media(source_media, ttl=ttl)
                 if not hasattr(media, "spoiler"):
-                    raise TypeError("mídia cadastrada não suporta spoiler")
+                    raise DefinitiveExternalEffectError(
+                        "mídia cadastrada não suporta spoiler"
+                    )
                 media.spoiler = bool(spoiler)
                 return media
 
@@ -382,6 +450,7 @@ class OutboxWriter:
                 except asyncio.TimeoutError:
                     pass
                 continue
+            lane = action_lane(action)
             handler = self.handlers.get((action["module_id"], action["action_type"]))
             if action["module_id"] != "core" and not self.module_enabled(action["module_id"]):
                 await self.storage.fail_action(
@@ -409,11 +478,28 @@ class OutboxWriter:
                 result = await handler(action, effects)
             except asyncio.CancelledError:
                 raise
+            except DefinitiveExternalEffectError as exc:
+                log.warning(
+                    "Ação rejeitada sem ambiguidade lane=%s key=%s erro=%s",
+                    lane,
+                    action["action_key"],
+                    exc,
+                )
+                await self.storage.fail_action(action["id"], exc)
             except AmbiguousExternalEffect as exc:
-                log.warning("Ação ambígua requer revisão key=%s", action["action_key"])
+                log.warning(
+                    "Ação ambígua requer revisão lane=%s key=%s erro=%s",
+                    lane,
+                    action["action_key"],
+                    exc,
+                )
                 await self.storage.review_action(action["id"], exc)
             except Exception as exc:
-                log.exception("Ação da outbox falhou key=%s", action["action_key"])
+                log.exception(
+                    "Ação da outbox falhou lane=%s key=%s",
+                    lane,
+                    action["action_key"],
+                )
                 await self.storage.fail_action(action["id"], exc)
             else:
                 await self.storage.finish_action(action["id"], result)
@@ -421,6 +507,8 @@ class OutboxWriter:
             # Core actions use the control-bot client. All feature actions use
             # the Telegram user session and therefore share one conservative
             # account-wide cadence, including backlog catch-up after restart.
+            # A PV peer is only a logical lane: waiting/review/failure in one
+            # conversation never owns this loop or blocks another ready peer.
             if action["module_id"] != "core":
                 if await self._wait_or_stop(self.user_action_min_interval_seconds):
                     return
