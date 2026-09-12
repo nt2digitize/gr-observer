@@ -161,6 +161,37 @@ class ControlPanel:
             await event.answer()
             await self.show_two_screens_media(event)
             return
+        view_match = re.fullmatch(r"pv:two_screens:view:(peitos|buceta|cu)", data)
+        if view_match:
+            slot = view_match.group(1)
+            row = await self.app.pool.fetchrow(
+                "SELECT slot,source_peer,source_message_id,updated_at "
+                "FROM pv_two_screens_media_slots WHERE slot=$1",
+                slot,
+            )
+            if not row:
+                await event.answer("Nenhuma foto cadastrada neste espaço.", alert=True)
+                return
+            _, source_client, source_message = await self._recover_two_screens_source(row)
+            if source_message is None:
+                await event.answer("⚠️ referência inválida — recadastre", alert=True)
+                await self.show_two_screens_media(event)
+                return
+            try:
+                media_bytes = await source_client.download_media(source_message, file=bytes)
+            except Exception:
+                media_bytes = None
+            if not media_bytes:
+                await event.answer("⚠️ referência inválida — recadastre", alert=True)
+                await self.show_two_screens_media(event)
+                return
+            await event.answer()
+            await self.client.send_file(
+                self.app.admin_id,
+                media_bytes,
+                caption=f"👁 {slot}",
+            )
+            return
         slot_match = re.fullmatch(r"pv:two_screens:slot:(peitos|buceta|cu)", data)
         if slot_match:
             self.awaiting_two_screens_slot = slot_match.group(1)
@@ -423,21 +454,57 @@ class ControlPanel:
                 text[:3900], buttons=buttons, parse_mode=None, link_preview=False
             )
 
+    async def _recover_two_screens_source(self, row):
+        clients = []
+        user_client = getattr(self.app, "user", None)
+        if user_client is not None:
+            clients.append(("user", user_client))
+        clients.append(("panel", self.client))
+        for source_name, client in clients:
+            try:
+                message = await client.get_messages(
+                    int(row["source_peer"]),
+                    ids=int(row["source_message_id"]),
+                )
+            except Exception:
+                continue
+            if message is not None and getattr(message, "media", None) is not None:
+                return source_name, client, message
+        return None, None, None
+
     async def show_two_screens_media(self, event) -> None:
-        rows = await self.app.pool.fetch("SELECT slot,updated_at FROM pv_two_screens_media_slots ORDER BY slot")
-        configured = {row["slot"] for row in rows}
-        labels = {slot: ("✅ cadastrada" if slot in configured else "⚪ falta cadastrar") for slot in ("peitos", "buceta", "cu")}
+        rows = await self.app.pool.fetch(
+            "SELECT slot,source_peer,source_message_id,updated_at "
+            "FROM pv_two_screens_media_slots ORDER BY slot"
+        )
+        by_slot = {row["slot"]: row for row in rows}
+        labels = {}
+        buttons = []
+        for slot in ("peitos", "buceta", "cu"):
+            row = by_slot.get(slot)
+            if row is None:
+                labels[slot] = "⚪ falta cadastrar"
+                buttons.append(
+                    [Button.inline(f"➕ Cadastrar foto — {slot}", f"pv:two_screens:slot:{slot}".encode())]
+                )
+                continue
+            _, _, message = await self._recover_two_screens_source(row)
+            if message is None:
+                labels[slot] = "⚠️ referência inválida — recadastre"
+            else:
+                labels[slot] = "✅ saudável"
+            buttons.append(
+                [
+                    Button.inline(f"👁 Ver foto — {slot}", f"pv:two_screens:view:{slot}".encode()),
+                    Button.inline(f"♻️ Trocar foto — {slot}", f"pv:two_screens:slot:{slot}".encode()),
+                ]
+            )
         text = (
             "📷 FOTOS — DUAS TELAS\n\n"
             "Envie uma foto no privado após tocar em um espaço. Apenas a referência da mensagem é guardada; trocar substitui a anterior.\n\n"
             + "\n".join(f"• {slot}: {labels[slot]}" for slot in ("peitos", "buceta", "cu"))
         )
-        buttons = [
-            [Button.inline("Peitos", b"pv:two_screens:slot:peitos")],
-            [Button.inline("Buceta", b"pv:two_screens:slot:buceta")],
-            [Button.inline("Cu", b"pv:two_screens:slot:cu")],
-            [Button.inline("↩️ Funções", b"functions")],
-        ]
+        buttons.append([Button.inline("↩️ Funções", b"functions")])
         if isinstance(event, events.CallbackQuery.Event):
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
         else:
