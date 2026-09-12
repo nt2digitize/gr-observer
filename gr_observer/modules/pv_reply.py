@@ -9,6 +9,7 @@ import re
 
 from ..catalog import (
     CAMPAIGNS,
+    DIALOGS,
     LIVE_INVITE_VARIANTS,
     LIVE_REMARKETING_VARIANTS,
     PV_GREETING_VARIANTS,
@@ -50,23 +51,13 @@ def classify_live_response(text: str) -> str:
 
 
 def classify_two_screens_response(text: str) -> str:
-    """Route yes/no acknowledgements to the preference question.
-
-    A real opt-out still wins.  A plain yes or no only answers the conversational
-    prompt "Faz duas telas?"; neither response ends this optional branch.
-    """
+    """Classify the conversational acknowledgement without changing persistence."""
     normalized = normalize_text(text)
     if any(value in normalized for value in ("parar", "não envie", "nao envie")):
         return "opt_out"
-    if normalized in {
-        "sim",
-        "quero",
-        "pode",
-        "manda",
-        "faz",
-        "não",
-        "nao",
-    }:
+    if normalized in {"não", "nao", "não quero", "nao quero"}:
+        return "negative"
+    if normalized in {"sim", "quero", "pode", "manda", "faz"}:
         return "positive"
     return "unknown"
 
@@ -75,8 +66,8 @@ def classify_two_screens_choice(text: str) -> str | None:
     """Return the media slot that best matches the user's stated preference.
 
     Whole-word aliases avoid false positives such as ``cu`` inside unrelated
-    words.  If a sentence mentions more than one option, the last explicit
-    preference wins, which better handles phrases such as "peito ou cu... cuzinho".
+    words. If a sentence mentions more than one option, the last explicit
+    preference wins, which handles a change of mind naturally.
     """
     normalized = normalize_text(text)
     aliases = {
@@ -246,6 +237,12 @@ class PvReplyModule:
         sender_id = int(sender.id)
         if self.me is not None and sender_id == int(self.me.id):
             return False
+        two_screens_response_kind = classify_two_screens_response(event.raw_text or "")
+        # In the active two-screens branch, a plain "não" answers only
+        # "Faz duas telas?". It must still advance to the preference question.
+        # Explicit stop language continues to be handled as opt-out.
+        if self.settings.pv_two_screens_enabled and two_screens_response_kind == "negative":
+            two_screens_response_kind = "positive"
         await self.storage.accept_pv_message(
             event_key=self._event_key(event),
             user_id=sender_id,
@@ -254,9 +251,7 @@ class PvReplyModule:
             display_name=display_name(sender),
             response_kind=classify_response(event.raw_text or ""),
             live_response_kind=classify_live_response(event.raw_text or ""),
-            two_screens_response_kind=classify_two_screens_response(
-                event.raw_text or ""
-            ),
+            two_screens_response_kind=two_screens_response_kind,
             two_screens_choice=classify_two_screens_choice(event.raw_text or ""),
             two_screens_photo_delay_seconds=stable_delay_seconds(
                 f"two-screens-photo:{sender_id}:{event.id}",
@@ -305,8 +300,7 @@ class PvReplyModule:
                 "Resposta positiva encerra sem nova mensagem; resposta negativa recebe o link.",
                 (
                     "Após o link: ramo opcional ‘Faz duas telas?’ em 20 s; "
-                    "sim ou não seguem para a pergunta de preferência e a foto "
-                    "só é enviada após uma escolha reconhecida."
+                    "com o ramo ativo, sim ou não seguem para a preferência."
                 ),
                 "‘Parar’ ou ‘não quero’ encerra tudo.",
             ]
@@ -471,17 +465,35 @@ class PvReplyModule:
         peer = int(action["payload"]["peer"])
         if not await self.storage.two_screens_action_allowed(peer, "question_queued"):
             return {"sent": False, "reason": "state_changed"}
+        if self.settings.pv_two_screens_enabled:
+            result = await effects.send_text(
+                peer,
+                DIALOGS["pv.two_screens.preference"],
+                f"{action['action_key']}:send",
+            )
+            # Accept the preference immediately after the options are visible.
+            advanced = await self.storage.advance_two_screens(
+                peer, "question_queued", "awaiting_choice"
+            )
+            return {"sent": True, "advanced": advanced, **result}
+
+        # Compatibility path for dormant/legacy tests and already-established
+        # behavior while the optional feature is deliberately disabled.
         result = await effects.send_text(
             peer,
             self.campaign_text("pv.two_screens.question"),
             f"{action['action_key']}:send",
         )
-        # As soon as the options are visible, accept the user's preference.
-        # The older limit/follow-up actions remain registered so already queued
-        # legacy sessions can finish safely, but new sessions do not wait for
-        # extra balloons before accepting the choice.
-        advanced = await self.storage.advance_two_screens(
-            peer, "question_queued", "awaiting_choice"
+        advanced = await self.storage.queue_next_two_screens_action(
+            peer,
+            expected="question_queued",
+            next_status="limit_queued",
+            action_type="send_two_screens_limit",
+            action_key=f"pv_reply:two-screens:limit:{peer}",
+            delay_seconds=stable_delay_seconds(
+                f"{action['action_key']}:limit-delay",
+                *TWO_SCREENS_BALLOON_DELAY_RANGE_SECONDS,
+            ),
         )
         return {"sent": True, "advanced": advanced, **result}
 
@@ -525,9 +537,14 @@ class PvReplyModule:
         peer = int(action["payload"]["peer"])
         if not await self.storage.two_screens_action_allowed(peer, "awaiting_choice"):
             return {"sent": False, "reason": "state_changed"}
+        text = (
+            DIALOGS["pv.two_screens.preference"]
+            if self.settings.pv_two_screens_enabled
+            else self.campaign_text("pv.two_screens.retry")
+        )
         result = await effects.send_text(
             peer,
-            self.campaign_text("pv.two_screens.retry"),
+            text,
             f"{action['action_key']}:send",
         )
         return {"sent": True, **result}
