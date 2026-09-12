@@ -2,7 +2,7 @@
 
 "Duas telas" is only the conversational name of this branch.  This module does
 not control screens/camera/device state.  It only reduces a private reply to one
-of three photo slots and creates a durable Outbox intent.
+of three photo slots and creates durable Outbox intents.
 """
 
 from __future__ import annotations
@@ -81,6 +81,105 @@ class PvPhotoFlowStore:
             )
         )
 
+    @staticmethod
+    async def _slot_state(conn, user_id: int) -> tuple[set[str], set[str], list[str]]:
+        media_rows = await conn.fetch(
+            """SELECT slot FROM pv_two_screens_media_slots
+               WHERE slot IN ('peitos','buceta','cu')"""
+        )
+        available = {str(item["slot"]) for item in media_rows if item["slot"]}
+        used_rows = await conn.fetch(
+            """SELECT DISTINCT payload->>'slot' AS slot
+               FROM outbox_actions
+               WHERE module_id='pv_reply'
+                 AND action_type='send_two_screens_photo'
+                 AND payload->>'peer'=$1
+                 AND status IN ('pending','processing','succeeded','review')""",
+            str(user_id),
+        )
+        used = {str(item["slot"]) for item in used_rows if item["slot"]}
+        remaining = [
+            slot for slot in PHOTO_SLOTS if slot in available and slot not in used
+        ]
+        return available, used, remaining
+
+    async def open_choice_window_and_schedule_auto_photo(
+        self,
+        *,
+        user_id: int,
+        expected_status: str,
+        action_key: str,
+        delay_seconds: int,
+    ) -> bool:
+        """Open preference collection and arm a durable no-reply fallback."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                updated = await conn.fetchval(
+                    """UPDATE pv_two_screens_sessions
+                       SET status='awaiting_choice',updated_at=NOW()
+                       WHERE user_id=$1 AND status=$2 RETURNING user_id""",
+                    user_id,
+                    expected_status,
+                )
+                if updated is None:
+                    return False
+                await conn.execute(
+                    """INSERT INTO outbox_actions(
+                       action_key,module_id,action_type,payload,available_at)
+                       VALUES($1,'pv_reply','auto_queue_two_screens_photo',$2::jsonb,
+                         NOW()+($3::double precision*INTERVAL '1 second'))
+                       ON CONFLICT(action_key) DO NOTHING""",
+                    action_key,
+                    _json({"peer": user_id}),
+                    max(0, int(delay_seconds)),
+                )
+                return True
+
+    async def auto_queue_first_photo(self, user_id: int) -> str:
+        """Queue one available photo if the lead did not choose in time."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """SELECT status FROM pv_two_screens_sessions
+                       WHERE user_id=$1 FOR UPDATE""",
+                    user_id,
+                )
+                if not row or row["status"] != "awaiting_choice":
+                    return "state_changed"
+
+                available, used, remaining = await self._slot_state(conn, user_id)
+                if not remaining:
+                    if available and available.issubset(used):
+                        await conn.execute(
+                            """UPDATE pv_two_screens_sessions
+                               SET status='completed',completed_at=NOW(),updated_at=NOW()
+                               WHERE user_id=$1""",
+                            user_id,
+                        )
+                        return "completed"
+                    return "media_unavailable"
+
+                slot = choose_unsent_slot(user_id, 0, remaining)
+                if slot is None:
+                    return "media_unavailable"
+                final = len(remaining) == 1
+                await conn.execute(
+                    """UPDATE pv_two_screens_sessions
+                       SET status='photo_queued',selected_slot=$2,updated_at=NOW()
+                       WHERE user_id=$1""",
+                    user_id,
+                    slot,
+                )
+                await conn.execute(
+                    """INSERT INTO outbox_actions(
+                       action_key,module_id,action_type,payload,available_at)
+                       VALUES($1,'pv_reply','send_two_screens_photo',$2::jsonb,NOW())
+                       ON CONFLICT(action_key) DO NOTHING""",
+                    f"pv_reply:two-screens:photo:auto:{user_id}:1",
+                    _json({"peer": user_id, "slot": slot, "final": final}),
+                )
+                return "photo_queued"
+
     async def accept_choice(
         self,
         *,
@@ -130,31 +229,23 @@ class PvPhotoFlowStore:
                     message_id,
                 )
 
-                used_rows = await conn.fetch(
-                    """SELECT DISTINCT payload->>'slot' AS slot
-                       FROM outbox_actions
-                       WHERE module_id='pv_reply'
-                         AND action_type='send_two_screens_photo'
-                         AND payload->>'peer'=$1
-                         AND status IN ('pending','processing','succeeded','review')""",
-                    str(user_id),
-                )
-                used = {str(item["slot"]) for item in used_rows if item["slot"]}
-                remaining = [slot for slot in PHOTO_SLOTS if slot not in used]
+                available, used, remaining = await self._slot_state(conn, user_id)
                 if not remaining:
-                    await conn.execute(
-                        """UPDATE pv_two_screens_sessions
-                           SET status='completed',completed_at=NOW(),updated_at=NOW()
-                           WHERE user_id=$1""",
-                        user_id,
-                    )
-                    return "completed"
+                    if available and available.issubset(used):
+                        await conn.execute(
+                            """UPDATE pv_two_screens_sessions
+                               SET status='completed',completed_at=NOW(),updated_at=NOW()
+                               WHERE user_id=$1""",
+                            user_id,
+                        )
+                        return "completed"
+                    return "media_unavailable"
 
                 slot = requested_slot if requested_slot in remaining else None
                 if slot is None:
                     slot = choose_unsent_slot(user_id, message_id, remaining)
                 if slot is None:
-                    return "completed"
+                    return "media_unavailable"
 
                 first_photo = not used
                 delay_seconds = (
