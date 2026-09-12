@@ -1,16 +1,18 @@
 # GR Observer — monólito modular
 
 Um único processo administra uma única sessão de usuário do Telegram e liga
-funções independentes (“costelas”) em uma coluna central. Hoje existem três:
+funções independentes (“costelas”) em uma coluna central. Hoje existem quatro:
 
 1. **Radar** — observação passiva de grupos, canais, permissões, regras, bots,
    links e origem provável de conversas privadas.
 2. **Atendimento PV** — recepção atrasada em duas mensagens, lembretes com
    intervalos progressivos e pergunta semanal condicionada à resposta.
-3. **Testar BOTSON** — homologação ativa, limitada por allowlist, da jornada de
+3. **Atendimento de Grupos** — respostas/republicações somente em grupos
+   autorizados, sempre pela Outbox e pelo Writer único.
+4. **Testar BOTSON** — homologação ativa, limitada por allowlist, da jornada de
    acesso, botões seguros, conversas, saída e reentrada.
 
-O painel de controle continua disponível mesmo quando as três funções estão
+O painel de controle continua disponível mesmo quando as quatro funções estão
 desligadas. O comando de produção permanece `python app.py`.
 
 ## Estrutura
@@ -20,20 +22,26 @@ app.py                         entrada compatível com Railway
 gr_observer/
   application.py              coluna central e sessão única
   catalog.py                  módulos, comandos e textos com IDs estáveis
+  group_integration.py        adaptador explícito da costela de grupos
   storage.py / schema.py      estado, Inbox, Outbox, execuções e efeitos
   outbox.py                   único Writer de ações ativas
   panel.py                    bot administrativo
   modules/
     radar.py                  costela passiva
     pv_reply.py               conversa privada e agenda semanal
+    group_reply.py            respostas/republicações em grupos autorizados
     botson.py                 comandos e relatórios de homologação
     botson_engine.py          jornada de teste allowlisted
 ```
 
+A composição é explícita: `Observer.setup` registra as costelas e seleciona o
+adaptador de painel. Importações não podem alterar `MODULES`, `COMMANDS`,
+`Observer.setup` ou `ControlPanel` por monkey patch.
+
 O Radar não recebe o Writer e não contém chamadas para enviar mensagens,
-clicar, entrar ou sair. Atendimento PV e BOTSON recebem um portão de efeitos e
-não abrem outra `TelegramClient`. Assim as funções compartilham infraestrutura,
-mas não compartilham regra de negócio.
+clicar, entrar ou sair. Atendimento PV, Atendimento de Grupos e BOTSON usam o
+portão de efeitos e não abrem outra `TelegramClient`. Assim as funções
+compartilham infraestrutura, mas não compartilham regra de negócio.
 
 ## Comandos de texto
 
@@ -49,6 +57,9 @@ privado do bot de controle, apenas `ADMIN_USER_ID` pode usar:
 - `ligar atendimento` ou `/ligar_atendimento`;
 - `desligar atendimento` ou `/desligar_atendimento`;
 - `ver mensagens pv` ou `/mensagens_pv`;
+- `ligar atendimento grupos` ou `/ligar_grupos`;
+- `desligar atendimento grupos` ou `/desligar_grupos`;
+- `ver atendimento grupos` ou `/atendimento_grupos`;
 - `ligar botson`;
 - `desligar botson`;
 - `testar botson` ou `/testar_botson` — coloca o teste na fila e entrega o
@@ -79,8 +90,8 @@ em três camadas:
    mesma transação PostgreSQL. Eventos repetidos não criam outra intenção.
 2. **Writer único:** somente um consumidor serial executa ações ativas usando a
    sessão compartilhada.
-3. **Diário de efeitos:** cada envio, clique, entrada ou saída tem chave
-   determinística. Envios de texto usam `random_id` estável do Telegram.
+3. **Diário de efeitos:** cada envio, clique, entrada, saída ou exclusão tem
+   chave determinística. Envios de texto usam `random_id` estável do Telegram.
    Entrada/saída podem ser reconciliadas pelo estado de membro. Um efeito
    interrompido e não reconciliável vai para `review`; nunca é repetido às
    cegas.
@@ -89,10 +100,11 @@ O resultado completo do teste e a intenção de entregar o relatório também s�
 gravados na mesma transação. Isso evita “teste concluído no banco, mas relatório
 esquecido” após uma queda.
 
-As tabelas aditivas são `module_control`, `inbox_events`, `outbox_actions`,
-`module_runs`, `telegram_effects` e `pv_reply_contacts`. A Outbox aceita
-`available_at`, portanto atrasos e lembretes sobrevivem a reinícios. As tabelas
-antigas e `observer_control` continuam compatíveis.
+Entre as tabelas aditivas estão `module_control`, `inbox_events`,
+`outbox_actions`, `module_runs`, `telegram_effects`, `pv_reply_contacts`,
+`group_reply_events` e `group_repost_state`. A Outbox aceita `available_at`,
+portanto atrasos e lembretes sobrevivem a reinícios. As tabelas antigas e
+`observer_control` continuam compatíveis.
 
 ## Radar
 
@@ -140,7 +152,8 @@ desligada e `🟡` durante a conexão.
 A função nasce desligada. Os grupos em `GROUP_REPLY_ALLOWLIST` são os alvos
 iniciais. Uma postagem manual de texto bem-sucedida também autoriza o grupo
 dinamicamente e salva esse texto como modelo; uma nova postagem manual no mesmo
-grupo substitui o modelo anterior. O estado fica persistido no PostgreSQL.
+grupo substitui o modelo anterior. Por isso a costela pode ser ligada mesmo com
+a allowlist vazia quando o objetivo é autorizar por postagem manual.
 
 Em cada grupo com modelo, somente mensagens novas de outras pessoas entram na
 contagem. Após dez mensagens, a função publica o texto novamente, confirma o ID
@@ -150,6 +163,10 @@ própria conta não entram na contagem e não substituem o modelo.
 Pedidos novos relacionados a esposa recebem uma das respostas curtas após
 70–90 segundos. Depois de cada resposta, o cooldown daquele grupo varia entre
 95–110 segundos. A função não pesquisa nem responde mensagens antigas.
+
+O estado `group_reply` e as tabelas da função pertencem ao schema central. A
+costela pode executar verificações idempotentes `CREATE IF NOT EXISTS` durante a
+transição, mas não se registra nem altera a arquitetura por efeito colateral.
 
 ## Atendimento PV
 
@@ -165,8 +182,8 @@ Fluxo:
    `Entra no grupo de prévias dela! Posso mandar o link`, espera 7 segundos e
    envia o link sozinho em outro balão;
 3. nos lembretes, envia `Gostou? Já gozou pra ela??` e o link em um balão
-   separado. Os intervalos
-   crescem aproximadamente de 1 até 7 dias: 23–25 h, 47–49 h, …, 167–169 h;
+   separado. Os intervalos crescem aproximadamente de 1 até 7 dias: 23–25 h,
+   47–49 h, …, 167–169 h;
 4. atingido o limite, envia semanalmente a pergunta aprovada, espera 7 segundos,
    envia o link sozinho, envia o convite para retornar e repete o link sozinho;
 5. resposta positiva encerra em silêncio; resposta negativa recebe o link;
@@ -199,9 +216,9 @@ explicitamente autorizada. Depois que o estado for alterado no painel, um
 reinício não desfaz a pausa administrativa.
 
 No menu `Funções`, os controles são botões diretos do painel. O administrador
-pode ligar, desligar, consultar o status, conferir as mensagens do PV e iniciar
-o teste BOTSON sem digitar ou copiar comandos. Os comandos de texto permanecem
-disponíveis como alternativa.
+pode ligar, desligar, consultar o status, conferir mensagens/configurações e
+iniciar o teste BOTSON sem digitar ou copiar comandos. Os comandos de texto
+permanecem disponíveis como alternativa.
 
 ### Avisos de live com consentimento
 
@@ -252,16 +269,28 @@ copia `app.py` e todo o pacote `gr_observer`.
 O Railway pode manter o deploy anterior vivo por alguns segundos. Uma trava
 consultiva do PostgreSQL serializa a conexão: o sucessor aguarda o contêiner
 anterior desconectar e só então abre a sessão. Isso evita nova concorrência
-durante deploys.
+entre processos que usam o mesmo banco.
 
-Essa proteção não recupera uma chave já invalidada. Quando aparecer
-`AuthKeyDuplicatedError`, gere uma nova sessão com `python generate_session.py`,
-substitua `USER_SESSION_STRING` e não reutilize o mesmo conteúdo em outro
-serviço, computador ou processo.
+Essa proteção não cobre outro serviço, computador, Termux ou processo que use a
+mesma StringSession e não recupera uma chave já invalidada. Quando aparecer
+`AuthKeyDuplicatedError`, essa chave deve ser descartada como credencial ativa.
 
-Antes de ativar **Testar BOTSON** neste monólito, desligue o serviço standalone
-que usa a mesma conta. Duas aplicações diferentes não podem compartilhar a
-StringSession.
+Para rotacionar, execute `python generate_session.py` na pasta do repositório.
+A versão atual gera primeiro uma nova sessão em arquivo temporário; só depois de
+o login ser confirmado arquiva o `radar-gr-session.txt` anterior e coloca a nova
+sessão no nome oficial. Assim uma falha de login não destrói a cópia anterior.
+
+Depois copie apenas o conteúdo do novo `radar-gr-session.txt` para
+`USER_SESSION_STRING` do `radar-gr-observer`. Nunca reutilize esse mesmo conteúdo
+em outro serviço/processo e nunca o publique em chat, log, issue ou GitHub.
+
+`Sessão única: online` só aparece depois que o Telegram confirma autorização da
+conta. Com todas as costelas desligadas, `Sessão única: offline` é esperado e o
+painel continua online.
+
+Antes de ativar **Testar BOTSON** neste monólito, desligue qualquer serviço
+standalone que use a mesma conta. Duas aplicações diferentes não podem
+compartilhar a StringSession.
 
 ## Verificação
 
@@ -271,9 +300,10 @@ python -m py_compile app.py gr_observer/*.py gr_observer/modules/*.py
 git diff --check
 ```
 
-Os testes são offline: validam os contratos, o catálogo, a passividade do
-Radar, o bloqueio de botões perigosos, a trava de sessão e as regras de
-idempotência. Não autenticam credenciais reais nem executam ações no Telegram.
+Os testes são offline: validam os contratos, o catálogo, a composição explícita,
+a passividade do Radar, o bloqueio de botões perigosos, a trava de sessão, a
+rotação do arquivo de sessão e as regras de idempotência. Não autenticam
+credenciais reais nem executam ações no Telegram.
 
 Veja também:
 
