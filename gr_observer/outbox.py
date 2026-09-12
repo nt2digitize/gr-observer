@@ -8,9 +8,16 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from telethon import functions
+from telethon import errors, functions
 
 log = logging.getLogger("gr-observer.outbox")
+
+# Conservative defaults for a user-session runtime. Telegram does not publish
+# one fixed safe send rate for user accounts; FLOOD_WAIT is authoritative.
+OUTBOX_STARTUP_GRACE_SECONDS = 45.0
+USER_ACTION_MIN_INTERVAL_SECONDS = 20.0
+USER_WRITE_MIN_INTERVAL_SECONDS = 3.0
+FLOOD_WAIT_BUFFER_SECONDS = 5
 
 
 class AmbiguousExternalEffect(RuntimeError):
@@ -37,14 +44,43 @@ def sent_message_id(result) -> int | None:
     return None
 
 
+class UserWritePacer:
+    """Serialize Telegram user writes with a minimum gap between effects."""
+
+    def __init__(self, minimum_interval_seconds: float) -> None:
+        self.minimum_interval_seconds = max(0.0, float(minimum_interval_seconds))
+        self._lock = asyncio.Lock()
+        self._next_allowed = 0.0
+
+    async def wait(self) -> None:
+        if self.minimum_interval_seconds <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            delay = self._next_allowed - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_allowed = loop.time() + self.minimum_interval_seconds
+
+
 class TelegramEffects:
     """The only port through which feature modules may mutate Telegram."""
 
-    def __init__(self, storage, client, action_id: int, panel_client=None):
+    def __init__(
+        self,
+        storage,
+        client,
+        action_id: int,
+        panel_client=None,
+        before_user_write: Callable[[], Awaitable[None]] | None = None,
+        flood_wait_buffer_seconds: int = FLOOD_WAIT_BUFFER_SECONDS,
+    ):
         self.storage = storage
         self.client = client
         self.action_id = action_id
         self.panel_client = panel_client
+        self.before_user_write = before_user_write
+        self.flood_wait_buffer_seconds = max(0, int(flood_wait_buffer_seconds))
 
     async def perform(
         self,
@@ -70,22 +106,44 @@ class TelegramEffects:
             raise AmbiguousExternalEffect(
                 f"efeito {effect_key} ficou ambíguo; revisão necessária antes de repetir"
             )
-        try:
-            result = await operation()
-        except BaseException as exc:
-            # A timeout can occur after Telegram accepted the operation. Never
-            # assume failure and repeat an active write blindly.
-            await self.storage.review_effect(effect_key, exc)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise AmbiguousExternalEffect(
-                f"resultado externo incerto em {effect_key}: {type(exc).__name__}"
-            ) from exc
+
+        while True:
+            try:
+                result = await operation()
+                break
+            except errors.FloodWaitError as exc:
+                # FLOOD_WAIT means Telegram rejected this invocation and gave
+                # the exact retry delay. Keep the same effect/action alive,
+                # block the single writer, and retry only after that window.
+                wait_seconds = max(1, int(exc.seconds)) + self.flood_wait_buffer_seconds
+                log.warning(
+                    "Outbox aguardando FloodWait por %ss antes de repetir efeito=%s",
+                    wait_seconds,
+                    effect_key,
+                )
+                await asyncio.sleep(wait_seconds)
+            except BaseException as exc:
+                # A timeout can occur after Telegram accepted the operation. Never
+                # assume failure and repeat an active write blindly.
+                await self.storage.review_effect(effect_key, exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise AmbiguousExternalEffect(
+                    f"resultado externo incerto em {effect_key}: {type(exc).__name__}"
+                ) from exc
+
         await self.storage.finish_effect(effect_key, result)
         return result
 
     async def send_text(self, peer, text: str, effect_key: str) -> dict[str, Any]:
-        return await self._send_text(self.client, peer, text, effect_key, "send_text")
+        return await self._send_text(
+            self.client,
+            peer,
+            text,
+            effect_key,
+            "send_text",
+            pace_user=True,
+        )
 
     async def send_panel_text(
         self, peer, text: str, effect_key: str
@@ -93,16 +151,30 @@ class TelegramEffects:
         if self.panel_client is None:
             raise RuntimeError("cliente do painel indisponível")
         return await self._send_text(
-            self.panel_client, peer, text, effect_key, "send_panel_text"
+            self.panel_client,
+            peer,
+            text,
+            effect_key,
+            "send_panel_text",
+            pace_user=False,
         )
 
     async def _send_text(
-        self, client, peer, text: str, effect_key: str, effect_type: str
+        self,
+        client,
+        peer,
+        text: str,
+        effect_key: str,
+        effect_type: str,
+        *,
+        pace_user: bool,
     ) -> dict[str, Any]:
         random_id = stable_random_id(effect_key)
 
         async def send():
             input_peer = await client.get_input_entity(peer)
+            if pace_user and self.before_user_write is not None:
+                await self.before_user_write()
             result = await client(
                 functions.messages.SendMessageRequest(
                     peer=input_peer,
@@ -126,6 +198,8 @@ class TelegramEffects:
         ids = [int(message_id) for message_id in message_ids]
 
         async def delete():
+            if self.before_user_write is not None:
+                await self.before_user_write()
             await self.client.delete_messages(peer, ids, revoke=True)
             return {"deleted": True, "message_ids": ids}
 
@@ -140,7 +214,10 @@ class TelegramEffects:
         self, source_peer, message_id: int, destination_peer, effect_key: str
     ) -> dict[str, Any]:
         """Forward one operator-catalogued media message through the user session."""
+
         async def forward():
+            if self.before_user_write is not None:
+                await self.before_user_write()
             result = await self.client.forward_messages(
                 destination_peer,
                 int(message_id),
@@ -149,12 +226,19 @@ class TelegramEffects:
                 drop_media_captions=True,
             )
             forwarded = result[0] if isinstance(result, (list, tuple)) and result else result
-            return {"message_id": sent_message_id(forwarded), "source_message_id": int(message_id)}
+            return {
+                "message_id": sent_message_id(forwarded),
+                "source_message_id": int(message_id),
+            }
 
         return await self.perform(
             effect_key,
             "forward_message",
-            {"source_peer": str(source_peer), "message_id": int(message_id), "destination_peer": str(destination_peer)},
+            {
+                "source_peer": str(source_peer),
+                "message_id": int(message_id),
+                "destination_peer": str(destination_peer),
+            },
             forward,
         )
 
@@ -162,13 +246,30 @@ class TelegramEffects:
 class OutboxWriter:
     """Serial dispatcher. Exactly one instance accompanies the user session."""
 
-    def __init__(self, storage, client, module_enabled=None, panel_client=None):
+    def __init__(
+        self,
+        storage,
+        client,
+        module_enabled=None,
+        panel_client=None,
+        *,
+        startup_grace_seconds: float = OUTBOX_STARTUP_GRACE_SECONDS,
+        user_action_min_interval_seconds: float = USER_ACTION_MIN_INTERVAL_SECONDS,
+        user_write_min_interval_seconds: float = USER_WRITE_MIN_INTERVAL_SECONDS,
+        flood_wait_buffer_seconds: int = FLOOD_WAIT_BUFFER_SECONDS,
+    ):
         self.storage = storage
         self.client = client
         self.module_enabled = module_enabled or (lambda _module_id: True)
         self.panel_client = panel_client
         self.handlers: dict[tuple[str, str], Callable] = {}
         self._stopped = asyncio.Event()
+        self.startup_grace_seconds = max(0.0, float(startup_grace_seconds))
+        self.user_action_min_interval_seconds = max(
+            0.0, float(user_action_min_interval_seconds)
+        )
+        self.flood_wait_buffer_seconds = max(0, int(flood_wait_buffer_seconds))
+        self.user_write_pacer = UserWritePacer(user_write_min_interval_seconds)
 
     def register(self, module_id: str, action_type: str, handler: Callable) -> None:
         key = (module_id, action_type)
@@ -179,7 +280,20 @@ class OutboxWriter:
     def stop(self) -> None:
         self._stopped.set()
 
+    async def _wait_or_stop(self, seconds: float) -> bool:
+        if seconds <= 0:
+            return self._stopped.is_set()
+        try:
+            await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
     async def run(self) -> None:
+        # A restart/reconnect must never dump all overdue PV work at once.
+        if await self._wait_or_stop(self.startup_grace_seconds):
+            return
+
         while not self._stopped.is_set():
             action = await self.storage.claim_next_action()
             if not action:
@@ -204,7 +318,12 @@ class OutboxWriter:
                 )
                 continue
             effects = TelegramEffects(
-                self.storage, self.client, action["id"], self.panel_client
+                self.storage,
+                self.client,
+                action["id"],
+                self.panel_client,
+                before_user_write=self.user_write_pacer.wait,
+                flood_wait_buffer_seconds=self.flood_wait_buffer_seconds,
             )
             try:
                 result = await handler(action, effects)
@@ -218,3 +337,10 @@ class OutboxWriter:
                 await self.storage.fail_action(action["id"], exc)
             else:
                 await self.storage.finish_action(action["id"], result)
+
+            # Core actions use the control-bot client. All feature actions use
+            # the Telegram user session and therefore share one conservative
+            # account-wide cadence, including backlog catch-up after restart.
+            if action["module_id"] != "core":
+                if await self._wait_or_stop(self.user_action_min_interval_seconds):
+                    return
