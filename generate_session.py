@@ -126,7 +126,7 @@ async def generate_session(api_id, api_hash, phone, destination):
     if destination.exists():
         raise SetupError(
             "Ja existe um arquivo de sessao no destino. "
-            "Use o fluxo principal para arquiva-lo antes de gerar outra sessao."
+            "Use o fluxo principal para rotaciona-lo com seguranca."
         )
     TelegramClient, StringSession, errors = telegram_runtime()
     client = TelegramClient(
@@ -194,6 +194,31 @@ async def generate_session(api_id, api_hash, phone, destination):
             print("Nao foi possivel confirmar a desconexao; o processo sera encerrado.")
 
 
+async def generate_rotated_session(api_id, api_hash, phone, destination):
+    """Gera primeiro em arquivo temporario e só então troca a sessao anterior."""
+    pending = destination.with_name(f".{destination.name}.new")
+    if pending.exists():
+        raise SetupError(
+            f"Existe uma geracao incompleta em {pending}. "
+            "Nao apague sem conferir; mova esse arquivo para backup e tente novamente."
+        )
+
+    await generate_session(api_id, api_hash, phone, pending)
+    archived = None
+    try:
+        archived = archive_existing_session(destination)
+        os.replace(pending, destination)
+    except BaseException:
+        # Se a troca falhar depois de arquivar a anterior, restaura a anterior.
+        if archived is not None and archived.exists() and not destination.exists():
+            try:
+                os.replace(archived, destination)
+            except OSError:
+                pass
+        raise
+    return archived
+
+
 def main():
     print("Radar GR - gerador local de sessao exclusiva v3")
     print("API ID e API HASH devem pertencer ao MESMO aplicativo Telegram.")
@@ -201,7 +226,6 @@ def main():
         "No Windows, hash, telefone, codigo e senha sao preenchidos em janelas com campo oculto."
     )
     destination = Path(os.environ.get("USERPROFILE") or Path.home()) / "radar-gr-session.txt"
-    archived = None
     try:
         raw_id = input("API ID (numero): ")
         raw_hash = read_secret("Cole o API HASH nesta caixa (32 caracteres, oculto): ")
@@ -210,10 +234,11 @@ def main():
         phone = validate_phone(
             read_secret("Telefone da conta com +55 e DDD (oculto): ")
         )
-        archived = archive_existing_session(destination)
+        archived = asyncio.run(
+            generate_rotated_session(api_id, api_hash, phone, destination)
+        )
         if archived:
             print(f"Sessao anterior arquivada em: {archived}")
-        asyncio.run(generate_session(api_id, api_hash, phone, destination))
     except SetupError as exc:
         print(f"\n{exc}")
         return 1
