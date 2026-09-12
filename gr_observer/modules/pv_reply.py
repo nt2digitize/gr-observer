@@ -15,6 +15,7 @@ from ..catalog import (
     PV_RESPONSE_RULES,
     normalize_text,
 )
+from ..pv_journey import PvJourneyStore
 from ..pv_photo_flow import (
     PvPhotoFlowStore,
     caption_for_slot,
@@ -146,6 +147,7 @@ class PvReplyModule:
         self.settings = settings
         pool = getattr(storage, "pool", None)
         self.photo_flow = PvPhotoFlowStore(pool) if pool is not None else None
+        self.journey = PvJourneyStore(pool) if pool is not None else None
         self.client = None
         self.me = None
 
@@ -197,6 +199,11 @@ class PvReplyModule:
             self.module_id,
             "send_two_screens_retry",
             self.action_send_two_screens_retry,
+        )
+        writer.register(
+            self.module_id,
+            "auto_queue_two_screens_photo",
+            self.action_auto_queue_two_screens_photo,
         )
         writer.register(
             self.module_id,
@@ -293,6 +300,21 @@ class PvReplyModule:
     def weekly_delay_seconds(self) -> int:
         return round(self.settings.pv_weekly_interval_hours * 3600)
 
+    async def _contact_allows_automation(self, peer: int) -> bool:
+        if self.journey is None:
+            return True
+        return await self.journey.contact_allows_automation(peer)
+
+    async def _send_preview_link(self, effects, peer: int, effect_key: str):
+        sender = getattr(effects, "send_text_preview", None)
+        if sender is None:
+            sender = effects.send_text
+        return await sender(
+            peer,
+            self.campaign_text("pv.preview_link"),
+            effect_key,
+        )
+
     def preview(self) -> str:
         windows = []
         for cycle in range(1, self.settings.pv_followup_max_cycles + 1):
@@ -308,14 +330,14 @@ class PvReplyModule:
                 f"2. {self.campaign_text('pv.link_invite')}",
                 f"3. Após {LINK_BALLOON_DELAY_SECONDS} s: {self.campaign_text('pv.preview_link')}",
                 f"Lembrete: {self.campaign_text('pv.followup')} + link separado",
-                f"Atraso das duas primeiras mensagens: {self.settings.pv_reply_delay_seconds} s",
+                f"Atraso da saudação e do avanço automático: {self.settings.pv_reply_delay_seconds} s",
                 f"Intervalos progressivos até o limite semanal: {schedule}",
                 f"Depois: {self.campaign_text('pv.weekly_question')} + sequência semanal",
                 f"Periodicidade semanal: {self.settings.pv_weekly_interval_hours:g} h",
-                "Resposta positiva encerra sem nova mensagem; resposta negativa recebe o link.",
+                "O link é agendado mesmo sem resposta; opt-out cancela a continuidade.",
                 (
-                    "Após o link: pede ‘duas telas’, pergunta peito/buceta/cuzinho e envia uma foto; "
-                    "se não entender, escolhe uma categoria ainda não enviada."
+                    "Após o link: pede ‘duas telas’, pergunta peito/buceta/cuzinho e arma uma foto automática; "
+                    "a resposta só escolhe a categoria se chegar antes do fallback."
                 ),
                 "Fotos extras pedidas depois entram uma por vez com 25–35 min entre elas, até três categorias.",
                 "‘Parar’ ou ‘não quero’ encerra tudo.",
@@ -331,7 +353,13 @@ class PvReplyModule:
             greeting_for(action["action_key"]),
             f"{action['action_key']}:send",
         )
-        advanced = await self.storage.mark_pv_greeting_sent(peer)
+        if self.journey is not None:
+            advanced = await self.journey.greeting_sent_and_schedule_link(
+                user_id=peer,
+                delay_seconds=self.settings.pv_reply_delay_seconds,
+            )
+        else:
+            advanced = await self.storage.mark_pv_greeting_sent(peer)
         return {"sent": True, "advanced": advanced, **result}
 
     async def action_send_link(self, action: dict, effects) -> dict:
@@ -344,9 +372,9 @@ class PvReplyModule:
             f"{action['action_key']}:invite",
         )
         await asyncio.sleep(LINK_BALLOON_DELAY_SECONDS)
-        link = await effects.send_text(
+        link = await self._send_preview_link(
+            effects,
             peer,
-            self.campaign_text("pv.preview_link"),
             f"{action['action_key']}:link",
         )
         advanced = await self.storage.mark_pv_link_sent_and_schedule(
@@ -358,6 +386,11 @@ class PvReplyModule:
             two_screens_delay_seconds=TWO_SCREENS_PROMPT_DELAY_SECONDS,
         )
         if advanced:
+            if self.journey is not None and self.settings.pv_two_screens_enabled:
+                await self.journey.ensure_two_screens_after_link(
+                    user_id=peer,
+                    delay_seconds=TWO_SCREENS_PROMPT_DELAY_SECONDS,
+                )
             await self.storage.queue_live_optin(peer, LIVE_OPTIN_DELAY_SECONDS)
         return {"sent": True, "advanced": advanced, "invite": invite, "link": link}
 
@@ -373,9 +406,9 @@ class PvReplyModule:
             self.campaign_text("pv.followup"),
             f"{action['action_key']}:reminder",
         )
-        link = await effects.send_text(
+        link = await self._send_preview_link(
+            effects,
             peer,
-            self.campaign_text("pv.preview_link"),
             f"{action['action_key']}:link",
         )
         next_cycle = cycle + 1
@@ -403,9 +436,9 @@ class PvReplyModule:
         peer = int(action["payload"]["peer"])
         if not await self.storage.pv_reminder_link_allowed(peer):
             return {"sent": False, "reason": "state_changed"}
-        result = await effects.send_text(
+        result = await self._send_preview_link(
+            effects,
             peer,
-            self.campaign_text("pv.preview_link"),
             f"{action['action_key']}:send",
         )
         return {"sent": True, **result}
@@ -421,9 +454,9 @@ class PvReplyModule:
             f"{action['action_key']}:question",
         )
         await asyncio.sleep(LINK_BALLOON_DELAY_SECONDS)
-        first_link = await effects.send_text(
+        first_link = await self._send_preview_link(
+            effects,
             peer,
-            self.campaign_text("pv.preview_link"),
             f"{action['action_key']}:first-link",
         )
         reentry = await effects.send_text(
@@ -431,9 +464,9 @@ class PvReplyModule:
             self.campaign_text("pv.weekly_reentry"),
             f"{action['action_key']}:reentry",
         )
-        second_link = await effects.send_text(
+        second_link = await self._send_preview_link(
+            effects,
             peer,
-            self.campaign_text("pv.preview_link"),
             f"{action['action_key']}:second-link",
         )
         advanced = await self.storage.complete_pv_weekly_and_schedule_next(
@@ -465,6 +498,8 @@ class PvReplyModule:
 
     async def action_send_two_screens_prompt(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped"}
         if not await self.storage.two_screens_action_allowed(peer, "prompt_queued"):
             return {"sent": False, "reason": "state_changed"}
         request = await effects.send_text(
@@ -477,9 +512,20 @@ class PvReplyModule:
             DIALOGS["pv.two_screens.preference"],
             f"{action['action_key']}:preference",
         )
-        advanced = await self.storage.advance_two_screens(
-            peer, "prompt_queued", "awaiting_choice"
-        )
+        if self.photo_flow is not None:
+            advanced = await self.photo_flow.open_choice_window_and_schedule_auto_photo(
+                user_id=peer,
+                expected_status="prompt_queued",
+                action_key=f"pv_reply:two-screens:auto-photo:{peer}",
+                delay_seconds=stable_delay_seconds(
+                    f"{action['action_key']}:auto-photo-delay",
+                    *TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
+                ),
+            )
+        else:
+            advanced = await self.storage.advance_two_screens(
+                peer, "prompt_queued", "awaiting_choice"
+            )
         return {
             "sent": True,
             "advanced": advanced,
@@ -489,6 +535,8 @@ class PvReplyModule:
 
     async def action_send_two_screens_question(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped"}
         if not await self.storage.two_screens_action_allowed(peer, "question_queued"):
             return {"sent": False, "reason": "state_changed"}
         if self.settings.pv_two_screens_enabled:
@@ -497,9 +545,20 @@ class PvReplyModule:
                 DIALOGS["pv.two_screens.preference"],
                 f"{action['action_key']}:send",
             )
-            advanced = await self.storage.advance_two_screens(
-                peer, "question_queued", "awaiting_choice"
-            )
+            if self.photo_flow is not None:
+                advanced = await self.photo_flow.open_choice_window_and_schedule_auto_photo(
+                    user_id=peer,
+                    expected_status="question_queued",
+                    action_key=f"pv_reply:two-screens:auto-photo:{peer}",
+                    delay_seconds=stable_delay_seconds(
+                        f"{action['action_key']}:auto-photo-delay",
+                        *TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
+                    ),
+                )
+            else:
+                advanced = await self.storage.advance_two_screens(
+                    peer, "question_queued", "awaiting_choice"
+                )
             return {"sent": True, "advanced": advanced, **result}
 
         result = await effects.send_text(
@@ -522,6 +581,8 @@ class PvReplyModule:
 
     async def action_send_two_screens_limit(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped"}
         if not await self.storage.two_screens_action_allowed(peer, "limit_queued"):
             return {"sent": False, "reason": "state_changed"}
         result = await effects.send_text(
@@ -544,6 +605,8 @@ class PvReplyModule:
 
     async def action_send_two_screens_followup(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped"}
         if not await self.storage.two_screens_action_allowed(peer, "followup_queued"):
             return {"sent": False, "reason": "state_changed"}
         result = await effects.send_text(
@@ -558,6 +621,8 @@ class PvReplyModule:
 
     async def action_send_two_screens_retry(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped"}
         if not await self.storage.two_screens_action_allowed(peer, "awaiting_choice"):
             return {"sent": False, "reason": "state_changed"}
         text = (
@@ -572,10 +637,21 @@ class PvReplyModule:
         )
         return {"sent": True, **result}
 
+    async def action_auto_queue_two_screens_photo(self, action: dict, effects) -> dict:
+        peer = int(action["payload"]["peer"])
+        if not await self._contact_allows_automation(peer):
+            return {"queued": False, "reason": "contact_stopped"}
+        if self.photo_flow is None:
+            return {"queued": False, "reason": "durable_store_unavailable"}
+        outcome = await self.photo_flow.auto_queue_first_photo(peer)
+        return {"queued": outcome == "photo_queued", "outcome": outcome}
+
     async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
         slot = str(action["payload"]["slot"])
         final = bool(action["payload"].get("final", False))
+        if not await self._contact_allows_automation(peer):
+            return {"sent": False, "reason": "contact_stopped", "slot": slot}
         if not await self.storage.two_screens_action_allowed(peer, "photo_queued"):
             return {"sent": False, "reason": "state_changed"}
         media = await self.storage.two_screens_media_slot(slot)

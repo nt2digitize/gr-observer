@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from PIL import Image, ImageOps
 from telethon import errors, functions, types, utils
 
 log = logging.getLogger("gr-observer.outbox")
@@ -18,6 +20,8 @@ OUTBOX_STARTUP_GRACE_SECONDS = 45.0
 USER_ACTION_MIN_INTERVAL_SECONDS = 20.0
 USER_WRITE_MIN_INTERVAL_SECONDS = 3.0
 FLOOD_WAIT_BUFFER_SECONDS = 5
+COURTESY_PHOTO_MAX_SIDE = 1080
+COURTESY_PHOTO_JPEG_QUALITY = 80
 
 # A conclusive local/RPC rejection must not be confused with a timeout or
 # disconnect where Telegram may already have applied the mutation. FloodWait
@@ -81,6 +85,40 @@ def sent_message_id(result) -> int | None:
         if found is not None:
             return int(found)
     return None
+
+
+def prepare_courtesy_photo(
+    media_bytes: bytes,
+    *,
+    max_side: int = COURTESY_PHOTO_MAX_SIDE,
+    jpeg_quality: int = COURTESY_PHOTO_JPEG_QUALITY,
+) -> bytes:
+    """Return a lightweight JPEG copy while leaving the catalogue source intact.
+
+    If Pillow cannot decode the source format, delivery remains fail-open and
+    the original bytes are uploaded exactly as before.
+    """
+    if not media_bytes:
+        return media_bytes
+    try:
+        with Image.open(io.BytesIO(media_bytes)) as source:
+            image = ImageOps.exif_transpose(source)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            side = max(1, int(max_side))
+            image.thumbnail((side, side), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=max(1, min(95, int(jpeg_quality))),
+                optimize=True,
+            )
+            prepared = output.getvalue()
+            return prepared or media_bytes
+    except Exception:
+        log.warning("Não foi possível otimizar foto de cortesia; usando original")
+        return media_bytes
 
 
 class UserWritePacer:
@@ -207,6 +245,21 @@ class TelegramEffects:
             effect_key,
             "send_text",
             pace_user=True,
+            link_preview=False,
+        )
+
+    async def send_text_preview(
+        self, peer, text: str, effect_key: str
+    ) -> dict[str, Any]:
+        """Send text while allowing Telegram to render a webpage/link preview."""
+        return await self._send_text(
+            self.client,
+            peer,
+            text,
+            effect_key,
+            "send_text_preview",
+            pace_user=True,
+            link_preview=True,
         )
 
     async def send_panel_text(
@@ -221,6 +274,7 @@ class TelegramEffects:
             effect_key,
             "send_panel_text",
             pace_user=False,
+            link_preview=False,
         )
 
     async def _send_text(
@@ -232,6 +286,7 @@ class TelegramEffects:
         effect_type: str,
         *,
         pace_user: bool,
+        link_preview: bool,
     ) -> dict[str, Any]:
         random_id = stable_random_id(effect_key)
 
@@ -244,7 +299,7 @@ class TelegramEffects:
                     peer=input_peer,
                     message=text,
                     random_id=random_id,
-                    no_webpage=True,
+                    no_webpage=not link_preview,
                 )
             )
             return {"message_id": sent_message_id(result), "random_id": random_id}
@@ -252,7 +307,12 @@ class TelegramEffects:
         return await self.perform(
             effect_key,
             effect_type,
-            {"peer": str(peer), "text": text, "random_id": random_id},
+            {
+                "peer": str(peer),
+                "text": text,
+                "random_id": random_id,
+                "link_preview": bool(link_preview),
+            },
             send,
         )
 
@@ -337,6 +397,7 @@ class TelegramEffects:
             source_media = getattr(source_message, "media", None)
             source_client = "user"
             uploaded_file = None
+            prepared_size = None
 
             if source_message is None or source_media is None:
                 panel_message = await get_source_message(self.panel_client)
@@ -352,6 +413,8 @@ class TelegramEffects:
                     raise DefinitiveExternalEffectError(
                         "mídia cadastrada não encontrada no Telegram"
                     )
+                media_bytes = prepare_courtesy_photo(media_bytes)
+                prepared_size = len(media_bytes)
                 uploaded_file = await self.client.upload_file(
                     media_bytes, file_name="photo.jpg"
                 )
@@ -404,6 +467,7 @@ class TelegramEffects:
                 "random_id": random_id,
                 "spoiler": bool(spoiler),
                 "ttl_seconds": used_ttl,
+                "prepared_bytes": prepared_size,
             }
 
         return await self.perform(
