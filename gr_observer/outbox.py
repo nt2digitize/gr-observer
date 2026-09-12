@@ -19,11 +19,11 @@ USER_ACTION_MIN_INTERVAL_SECONDS = 20.0
 USER_WRITE_MIN_INTERVAL_SECONDS = 3.0
 FLOOD_WAIT_BUFFER_SECONDS = 5
 
-# A 4xx RPC response is a conclusive rejection of that invocation. It must not
-# be confused with a timeout/disconnect where Telegram may already have applied
-# the mutation. FloodWait is handled separately and retried after Telegram's
-# own wait window.
+# A conclusive local/RPC rejection must not be confused with a timeout or
+# disconnect where Telegram may already have applied the mutation. FloodWait
+# is handled separately and retried after Telegram's own wait window.
 DEFINITIVE_RPC_ERRORS = (
+    ValueError,
     errors.BadRequestError,
     errors.UnauthorizedError,
     errors.ForbiddenError,
@@ -179,8 +179,8 @@ class TelegramEffects:
                 await self.storage.finish_effect(effect_key, _rejection_result(exc))
                 raise
             except DEFINITIVE_RPC_ERRORS as exc:
-                # Telegram returned a concrete 4xx RPC rejection. This call is
-                # known to have failed, therefore review would be incorrect.
+                # Telegram/local validation returned a concrete rejection. This
+                # call is known to have failed, therefore review would be wrong.
                 await self.storage.finish_effect(effect_key, _rejection_result(exc))
                 raise DefinitiveExternalEffectError(
                     f"{type(exc).__name__}: {exc}"
