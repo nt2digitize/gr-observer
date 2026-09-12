@@ -115,7 +115,7 @@ CAMPAIGNS = {
     "pv.two_screens.question": {
         "order": 90,
         "module": "pv_reply",
-        "text": "Prefere fazer nos peitos, na buceta ou no cu?",
+        "text": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
     },
     "pv.two_screens.limit": {
         "order": 100,
@@ -130,7 +130,7 @@ CAMPAIGNS = {
     "pv.two_screens.retry": {
         "order": 120,
         "module": "pv_reply",
-        "text": "Escolhe uma: peitos, buceta ou cu",
+        "text": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
     },
 }
 
