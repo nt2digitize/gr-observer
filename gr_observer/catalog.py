@@ -35,6 +35,7 @@ DIALOGS = {
     "botson.busy": "Teste BOTSON já está em andamento.",
     "botson.expired": "Relatório expirou. Envie: testar",
     "botson.not_found": "Secretaria não encontrada.",
+    "pv.two_screens.preference": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
 }
 
 # Text is centralized here; the private invite itself stays in Railway's
