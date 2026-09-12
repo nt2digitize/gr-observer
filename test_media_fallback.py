@@ -91,7 +91,9 @@ class MediaFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["source_client"], "panel")
         panel.download_media.assert_awaited_once_with(panel_message, file=bytes)
-        user.upload_file.assert_awaited_once_with(b"legacy-photo")
+        user.upload_file.assert_awaited_once_with(
+            b"legacy-photo", file_name="photo.jpg"
+        )
         request = user.requests[-1]
         self.assertIsInstance(request, functions.messages.SendMediaRequest)
         self.assertIsInstance(request.media, types.InputMediaUploadedPhoto)

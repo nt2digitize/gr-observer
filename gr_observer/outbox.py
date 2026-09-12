@@ -352,7 +352,9 @@ class TelegramEffects:
                     raise DefinitiveExternalEffectError(
                         "mídia cadastrada não encontrada no Telegram"
                     )
-                uploaded_file = await self.client.upload_file(media_bytes)
+                uploaded_file = await self.client.upload_file(
+                    media_bytes, file_name="photo.jpg"
+                )
                 source_client = "panel"
 
             input_peer = await self.client.get_input_entity(destination_peer)
