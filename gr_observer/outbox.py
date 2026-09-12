@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from telethon import errors, functions, utils
+from telethon import errors, functions, types, utils
 
 log = logging.getLogger("gr-observer.outbox")
 
@@ -316,7 +316,7 @@ class TelegramEffects:
         spoiler: bool = True,
         ttl_seconds: int | None = 30,
     ) -> dict[str, Any]:
-        """Copy catalogued Telegram media with spoiler and optional self-destruct TTL."""
+        """Copy catalogued media through the user session, with panel fallback."""
         random_id = stable_random_id(effect_key)
         requested_ttl = (
             None
@@ -324,19 +324,46 @@ class TelegramEffects:
             else max(1, min(60, int(ttl_seconds)))
         )
 
+        async def get_source_message(client):
+            if client is None:
+                return None
+            try:
+                return await client.get_messages(source_peer, ids=int(message_id))
+            except DEFINITIVE_RPC_ERRORS:
+                return None
+
         async def send():
-            source_message = await self.client.get_messages(
-                source_peer, ids=int(message_id)
-            )
+            source_message = await get_source_message(self.client)
             source_media = getattr(source_message, "media", None)
+            source_client = "user"
+            uploaded_file = None
+
             if source_message is None or source_media is None:
-                raise DefinitiveExternalEffectError(
-                    "mídia cadastrada não encontrada no Telegram"
+                panel_message = await get_source_message(self.panel_client)
+                panel_media = getattr(panel_message, "media", None)
+                if panel_message is None or panel_media is None:
+                    raise DefinitiveExternalEffectError(
+                        "mídia cadastrada não encontrada no Telegram"
+                    )
+                media_bytes = await self.panel_client.download_media(
+                    panel_message, file=bytes
                 )
+                if not media_bytes:
+                    raise DefinitiveExternalEffectError(
+                        "mídia cadastrada não encontrada no Telegram"
+                    )
+                uploaded_file = await self.client.upload_file(media_bytes)
+                source_client = "panel"
 
             input_peer = await self.client.get_input_entity(destination_peer)
 
             def build_media(ttl: int | None):
+                if uploaded_file is not None:
+                    return types.InputMediaUploadedPhoto(
+                        file=uploaded_file,
+                        ttl_seconds=ttl,
+                        spoiler=bool(spoiler),
+                    )
                 media = utils.get_input_media(source_media, ttl=ttl)
                 if not hasattr(media, "spoiler"):
                     raise DefinitiveExternalEffectError(
@@ -371,6 +398,7 @@ class TelegramEffects:
             return {
                 "message_id": sent_message_id(result),
                 "source_message_id": int(message_id),
+                "source_client": source_client,
                 "random_id": random_id,
                 "spoiler": bool(spoiler),
                 "ttl_seconds": used_ttl,
