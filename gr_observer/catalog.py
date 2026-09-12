@@ -111,7 +111,7 @@ CAMPAIGNS = {
     "pv.two_screens.prompt": {
         "order": 80,
         "module": "pv_reply",
-        "text": "Faz duas telas?",
+        "text": "Faz um duas telas pra mim 😈",
     },
     "pv.two_screens.question": {
         "order": 90,
