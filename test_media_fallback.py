@@ -155,6 +155,45 @@ class PanelMediaTests(unittest.IsolatedAsyncioTestCase):
             [(123, 77)],
         )
 
+    async def test_view_sends_inline_photo_not_document(self):
+        media_bytes = b"jpeg-preview"
+        media_message = NS(media=NS())
+        panel_client = FakePanelClient(media_message, media_bytes)
+        user_client = FakeUserClient(None)
+        pool = NS(
+            fetchrow=AsyncMock(
+                return_value={
+                    "slot": "peitos",
+                    "source_peer": 123,
+                    "source_message_id": 77,
+                    "updated_at": None,
+                }
+            )
+        )
+        app = NS(
+            panel=panel_client,
+            user=user_client,
+            pool=pool,
+            admin_id=123,
+            is_admin=lambda _event: True,
+        )
+        panel = ControlPanel(app)
+        event = NS(
+            data=b"pv:two_screens:view:peitos",
+            answer=AsyncMock(),
+        )
+
+        await panel.on_callback(event)
+
+        panel_client.download_media.assert_awaited_once_with(media_message, file=bytes)
+        panel_client.send_file.assert_awaited_once()
+        send = panel_client.send_file.await_args
+        preview_file = send.args[1]
+        self.assertEqual(preview_file.name, "peitos.jpg")
+        self.assertEqual(preview_file.getvalue(), media_bytes)
+        self.assertIs(send.kwargs["force_document"], False)
+        self.assertEqual(send.kwargs["caption"], "👁 peitos")
+
     async def test_invalid_legacy_reference_is_explicit(self):
         panel_client = FakePanelClient(None)
         user_client = FakeUserClient(None)
