@@ -502,7 +502,6 @@ class OutboxWriter:
     ):
         self.storage = storage
         self.client = client
-        self.action_id = None
         self.module_enabled = module_enabled or (lambda _module_id: True)
         self.panel_client = panel_client
         self.handlers: dict[tuple[str, str], Callable] = {}
