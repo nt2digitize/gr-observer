@@ -143,7 +143,8 @@ class PvReplyModule:
     def __init__(self, storage, settings):
         self.storage = storage
         self.settings = settings
-        self.photo_flow = PvPhotoFlowStore(storage.pool)
+        pool = getattr(storage, "pool", None)
+        self.photo_flow = PvPhotoFlowStore(pool) if pool is not None else None
         self.client = None
         self.me = None
 
@@ -226,11 +227,12 @@ class PvReplyModule:
         choice = classify_two_screens_choice(raw_text)
 
         # Once the preference question is visible, this branch owns the next
-        # private reply.  Ambiguous replies deliberately fall back to one of
-        # the not-yet-sent slots.  Explicit opt-out still goes through the
+        # private reply. Ambiguous replies deliberately fall back to one of
+        # the not-yet-sent slots. Explicit opt-out still goes through the
         # primary PV state machine below and stops all automation.
         if (
-            self.settings.pv_two_screens_enabled
+            self.photo_flow is not None
+            and self.settings.pv_two_screens_enabled
             and response_kind != "opt_out"
             and live_response_kind != "opt_out"
             and await self.photo_flow.is_waiting_choice(sender_id)
@@ -578,6 +580,19 @@ class PvReplyModule:
         media = await self.storage.two_screens_media_slot(slot)
         if not media:
             return {"sent": False, "reason": "media_slot_missing", "slot": slot}
+
+        # Isolated unit-test storage has no PostgreSQL pool. Keep the legacy
+        # single-photo contract there; production always has the durable store.
+        if self.photo_flow is None:
+            result = await effects.forward_message(
+                int(media["source_peer"]),
+                int(media["source_message_id"]),
+                peer,
+                f"{action['action_key']}:send",
+            )
+            advanced = await self.storage.mark_two_screens_photo_sent(peer, slot)
+            return {"sent": True, "advanced": advanced, "slot": slot, **result}
+
         photo = await effects.forward_message(
             int(media["source_peer"]),
             int(media["source_message_id"]),
