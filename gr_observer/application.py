@@ -10,11 +10,11 @@ from telethon import TelegramClient, errors, events
 from telethon.sessions import MemorySession, StringSession
 
 from .config import Settings
+from .group_integration import GroupControlPanel, register_group_reply
 from .modules.botson import BotsonModule
 from .modules.pv_reply import PvReplyModule
 from .modules.radar import RadarModule
 from .outbox import OutboxWriter
-from .panel import ControlPanel
 from .registry import ModuleRegistry
 from .storage import Storage
 
@@ -42,6 +42,7 @@ class Observer:
         self.control_panel = None
         self.user = None
         self.me = None
+        self.session_authorized = False
         self.writer = None
         self.worker: asyncio.Task | None = None
         self.writer_task: asyncio.Task | None = None
@@ -64,6 +65,7 @@ class Observer:
         self.registry.register(
             "pv_reply", PvReplyModule(self.storage, self.settings)
         )
+        register_group_reply(self)
         self.registry.register("botson", BotsonModule(self.storage, self.settings))
         self.registry.apply_states(await self.storage.module_states())
         await self.apply_startup_requests()
@@ -77,7 +79,7 @@ class Observer:
         self.state_reason = radar.reason
         self.enabled = radar.enabled
         await self.panel.start(bot_token=self.settings.control_bot_token)
-        self.control_panel = ControlPanel(self)
+        self.control_panel = GroupControlPanel(self)
         self.control_panel.register_handlers()
         if self.registry.enabled():
             self.worker = asyncio.create_task(
@@ -142,7 +144,12 @@ class Observer:
         if isinstance(exc, errors.AuthKeyDuplicatedError):
             return (
                 "Sessão invalidada pelo Telegram (AuthKeyDuplicatedError). "
-                "Gere uma nova USER_SESSION_STRING antes de ligar."
+                "Gere uma nova USER_SESSION_STRING exclusiva antes de ligar."
+            )
+        if isinstance(exc, RuntimeError) and str(exc) == "Sessão não autorizada":
+            return (
+                "Sessão não autorizada pelo Telegram. "
+                "Gere uma nova USER_SESSION_STRING exclusiva antes de ligar."
             )
         return f"Observação parada: {type(exc).__name__}. Confira a sessão e a conexão."
 
@@ -187,7 +194,7 @@ class Observer:
                 if module_id == "radar":
                     self.enabled = False
                     self.state_reason = "Conectando"
-                if self.user is not None:
+                if self.user is not None and self.session_authorized:
                     await self._connect_module(module_id)
                 elif not self.worker or self.worker.done():
                     self.worker = asyncio.create_task(
@@ -268,7 +275,7 @@ class Observer:
         self.active_events.add(task)
         try:
             # Dispatch order is data. Operational commands get first refusal;
-            # ordinary PV events can still reach both Atendimento and Radar.
+            # ordinary events can still reach lower-priority observer ribs.
             items = sorted(
                 self.registry.enabled(),
                 key=lambda item: item.spec["dispatch_order"],
@@ -304,6 +311,7 @@ class Observer:
     async def user_runtime(self) -> None:
         session_lock = None
         runtime_tasks = []
+        self.session_authorized = False
         try:
             session_lock = await self.acquire_user_session_lock()
             await self.storage.recover_interrupted()
@@ -318,6 +326,7 @@ class Observer:
             if not await self.user.is_user_authorized():
                 raise RuntimeError("Sessão não autorizada")
             self.me = await self.user.get_me()
+            self.session_authorized = True
             self.writer = OutboxWriter(
                 self.storage,
                 self.user,
@@ -356,6 +365,7 @@ class Observer:
             self.enabled = False
             self.state_reason = reason
         finally:
+            self.session_authorized = False
             if self.writer:
                 self.writer.stop()
             for task in runtime_tasks + list(self.active_events):
@@ -389,7 +399,7 @@ class Observer:
             )
             icon = "🟢" if status == "LIGADO" else "🟡" if status == "CONECTANDO" else "🔴"
             lines.extend((f"{icon} {item.spec['label']}: {status}", item.reason))
-        session_status = "online" if self.user is not None else "offline"
+        session_status = "online" if self.session_authorized else "offline"
         lines.extend((f"Sessão única: {session_status}", "Painel: online"))
         return "\n".join(lines)
 
