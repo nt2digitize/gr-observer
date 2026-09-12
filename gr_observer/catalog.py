@@ -35,6 +35,7 @@ DIALOGS = {
     "botson.busy": "Teste BOTSON já está em andamento.",
     "botson.expired": "Relatório expirou. Envie: testar",
     "botson.not_found": "Secretaria não encontrada.",
+    "pv.two_screens.preference": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
 }
 
 # Text is centralized here; the private invite itself stays in Railway's
@@ -115,7 +116,7 @@ CAMPAIGNS = {
     "pv.two_screens.question": {
         "order": 90,
         "module": "pv_reply",
-        "text": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
+        "text": "Prefere fazer nos peitos, na buceta ou no cu?",
     },
     "pv.two_screens.limit": {
         "order": 100,
@@ -130,7 +131,7 @@ CAMPAIGNS = {
     "pv.two_screens.retry": {
         "order": 120,
         "module": "pv_reply",
-        "text": "Onde quer jogar um leite? Peito, buceta ou cuzinho?",
+        "text": "Escolhe uma: peitos, buceta ou cu",
     },
 }
 
