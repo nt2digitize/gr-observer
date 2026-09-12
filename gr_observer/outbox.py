@@ -136,6 +136,9 @@ class TelegramEffects:
             payload=payload,
         )
         if decision == "succeeded":
+            # Storage currently has one terminal resolved state. A conclusive
+            # rejection is recorded in the result so it stays idempotent but
+            # can never be mistaken for a delivered Telegram mutation.
             if (
                 isinstance(previous, dict)
                 and previous.get(_EFFECT_OUTCOME_KEY) == _EFFECT_REJECTED
@@ -159,6 +162,9 @@ class TelegramEffects:
                 result = await operation()
                 break
             except errors.FloodWaitError as exc:
+                # FLOOD_WAIT means Telegram rejected this invocation and gave
+                # the exact retry delay. Keep the same effect/action alive,
+                # block the single writer, and retry only after that window.
                 wait_seconds = max(1, int(exc.seconds)) + self.flood_wait_buffer_seconds
                 log.warning(
                     "Outbox aguardando FloodWait por %ss antes de repetir efeito=%s",
@@ -167,14 +173,22 @@ class TelegramEffects:
                 )
                 await asyncio.sleep(wait_seconds)
             except DefinitiveExternalEffectError as exc:
+                # Deterministic local validation failed before a Telegram
+                # mutation could be issued. Resolve the journal entry and fail
+                # only this action/lane; do not quarantine it as ambiguous.
                 await self.storage.finish_effect(effect_key, _rejection_result(exc))
                 raise
             except DEFINITIVE_RPC_ERRORS as exc:
+                # Telegram/local validation returned a concrete rejection. This
+                # call is known to have failed, therefore review would be wrong.
                 await self.storage.finish_effect(effect_key, _rejection_result(exc))
                 raise DefinitiveExternalEffectError(
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
             except BaseException as exc:
+                # Timeout, disconnect, cancellation or server-side uncertainty
+                # may happen after Telegram accepted a mutation. Only this
+                # genuinely uncertain class belongs in review.
                 await self.storage.review_effect(effect_key, exc)
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -376,6 +390,8 @@ class TelegramEffects:
             try:
                 result = await send_request(build_media(requested_ttl))
             except errors.BadRequestError as exc:
+                # A rejected TTL request is known not to have produced a send,
+                # so it is safe to retry once without TTL while preserving spoiler.
                 if requested_ttl is None or "TTL_MEDIA_INVALID" not in str(exc).upper():
                     raise
                 used_ttl = None
@@ -452,6 +468,7 @@ class OutboxWriter:
         return True
 
     async def run(self) -> None:
+        # A restart/reconnect must never dump all overdue PV work at once.
         if await self._wait_or_stop(self.startup_grace_seconds):
             return
 
@@ -517,6 +534,11 @@ class OutboxWriter:
             else:
                 await self.storage.finish_action(action["id"], result)
 
+            # Core actions use the control-bot client. All feature actions use
+            # the Telegram user session and therefore share one conservative
+            # account-wide cadence, including backlog catch-up after restart.
+            # A PV peer is only a logical lane: waiting/review/failure in one
+            # conversation never owns this loop or blocks another ready peer.
             if action["module_id"] != "core":
                 if await self._wait_or_stop(self.user_action_min_interval_seconds):
                     return
