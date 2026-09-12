@@ -1,5 +1,31 @@
 # Changelog
 
+## Não lançado — reparo arquitetural e sessão
+
+### Corrigido
+
+- `group_reply` passa a ser uma costela de primeira classe no catálogo e no
+  schema central;
+- removido o monkey patch por importação que alterava `MODULES`, `COMMANDS`,
+  `ControlPanel` e `Observer.setup`;
+- `Observer.setup` volta a ser a composição autoritativa das quatro costelas;
+- Atendimento de Grupos pode ser ligado com allowlist vazia quando a autorização
+  será criada por uma postagem manual;
+- `Sessão única: online` só é exibido depois da autorização da conta ser
+  confirmada pelo Telegram;
+- `AuthKeyDuplicatedError` e sessão não autorizada deixam motivo explícito para
+  rotação de uma StringSession exclusiva.
+
+### Operação
+
+- `generate_session.py` v3 gera a sessão nova primeiro e só depois arquiva a
+  anterior, evitando perda do arquivo antigo se o login falhar;
+- o arquivo anterior é arquivado com data/hora e nunca é sobrescrito ou exibido;
+- documentação de arquitetura e cutover agora cobre quatro costelas, rotação da
+  sessão e limites da trava PostgreSQL;
+- adicionados testes de composição explícita e rotação atômica do arquivo de
+  sessão.
+
 ## Não lançado — monólito modular
 
 ### Adicionado

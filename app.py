@@ -7,7 +7,6 @@ import os
 from dotenv import load_dotenv
 
 from gr_observer.application import Observer
-import gr_observer.group_integration  # noqa: F401  # registers optional Group Attendance
 from gr_observer.config import missing_panel_env
 
 load_dotenv()

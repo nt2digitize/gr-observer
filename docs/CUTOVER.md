@@ -8,7 +8,11 @@ sessão.
 
 - testes offline aprovados;
 - branch de homologação revisada;
-- nova StringSession gerada e nunca usada em outro processo;
+- todas as costelas desligadas antes da troca de credencial;
+- nova StringSession gerada **depois** do último `AuthKeyDuplicatedError` e nunca
+  usada em outro processo;
+- nenhum serviço standalone, Termux, notebook ou processo local usando a mesma
+  StringSession;
 - convite da prévia cadastrado em `PV_PREVIEW_LINK` somente no Railway;
 - `PV_REPLY_AUTO_ENABLE=true` somente quando o primeiro acionamento tiver sido
   autorizado; manter `false` nos demais ambientes;
@@ -16,24 +20,61 @@ sessão.
 - controlador definido;
 - backup lógico do PostgreSQL ou snapshot disponível.
 
-## Ordem de ativação
+## Regra de ouro da sessão
 
-1. Implantar o monólito com Radar, Atendimento PV e BOTSON desligados.
+`AuthKeyDuplicatedError` invalida a chave afetada. Reimplantar, reiniciar ou
+recolar o mesmo conteúdo de `radar-gr-session.txt` não corrige essa chave.
+
+A trava consultiva PostgreSQL protege apenas o handoff entre processos que
+compartilham o mesmo banco. Ela não autoriza usar a StringSession em outro
+serviço, computador ou processo.
+
+O gerador local `generate_session.py` arquiva automaticamente um
+`radar-gr-session.txt` anterior e só então cria um novo. O conteúdo nunca deve
+ser colado em chat, issue, log ou GitHub.
+
+## Ordem de rotação quando a sessão está inválida
+
+1. Manter Radar, Atendimento PV, Atendimento de Grupos e BOTSON desligados.
+2. Confirmar que não existe runner standalone ou processo local usando a sessão.
+3. No computador que possui o repositório, entrar na pasta `gr-observer`.
+4. Executar `python generate_session.py`.
+5. Concluir API ID, API HASH, telefone, código e 2FA, se solicitada.
+6. Confirmar a mensagem `NOVA sessao salva em:`. O arquivo anterior, se existia,
+   terá sido renomeado para `radar-gr-session-anterior-<data-hora>.txt`.
+7. Copiar **somente** o conteúdo do novo `radar-gr-session.txt` para
+   `USER_SESSION_STRING` do serviço `radar-gr-observer`.
+8. Fazer um único redeploy.
+9. Confirmar `Painel: online` e `Sessão única: offline` enquanto todas as
+   costelas continuarem desligadas. Isso é esperado: não há conexão da conta sem
+   uma função ligada.
+10. Enviar `ligar radar` e conferir `Sessão única: online`, Radar `LIGADO` e
+    ausência de `AuthKeyDuplicatedError`.
+11. Só depois validar as outras costelas uma a uma.
+
+Se o passo 10 retornar `AuthKeyDuplicatedError`, não repetir o mesmo arquivo.
+Primeiro localizar e encerrar o segundo processo; depois gerar **outra** sessão.
+
+## Ordem de ativação funcional
+
+1. Implantar o monólito com as quatro costelas desligadas.
 2. Confirmar `Painel: online` e executar `status`.
-3. Parar o serviço `telegram-inspector-runner` antigo.
-4. Confirmar que ele não mantém conexão ativa.
-5. Cadastrar a nova `USER_SESSION_STRING` somente no monólito.
-6. Enviar `ligar radar`; validar inventário e ausência de
+3. Confirmar que qualquer serviço antigo da mesma conta está parado.
+4. Cadastrar uma nova `USER_SESSION_STRING` exclusiva somente no monólito.
+5. Enviar `ligar radar`; validar inventário e ausência de
    `AuthKeyDuplicatedError`.
-7. Enviar `ver mensagens pv` e conferir os textos/intervalos.
-8. Se a ativação inicial automática não foi autorizada, enviar
+6. Enviar `ver mensagens pv` e conferir os textos/intervalos.
+7. Se a ativação inicial automática não foi autorizada, enviar
    `ligar atendimento`. Testar com uma conta não-bot: primeiro PV, resposta e
    recebimento do link. Para os ciclos longos, conferir `next_followup_at` no
    banco em vez de aguardar em produção.
+8. Enviar `ligar atendimento grupos`. A allowlist pode estar vazia quando a
+   intenção é autorizar grupos por postagem manual; nesse caso, publicar
+   manualmente em um grupo e conferir o cadastro do modelo.
 9. Enviar `ligar botson`; parear se necessário.
 10. Rodar `testar botson` com uma allowlist de uma Secretaria.
 11. Conferir acesso final, Outbox e efeitos em `review`.
-12. Ampliar a allowlist apenas depois da homologação.
+12. Ampliar allowlists apenas depois da homologação.
 
 Não existe etapa em que dois serviços recebem a mesma StringSession.
 
@@ -54,6 +95,9 @@ FROM module_runs ORDER BY created_at DESC LIMIT 20;
 
 SELECT user_id, stage, followup_cycle, weekly_cycle, next_followup_at
 FROM pv_reply_contacts ORDER BY updated_at DESC LIMIT 30;
+
+SELECT chat_id, message_id, user_id, status, sent_at
+FROM group_reply_events ORDER BY created_at DESC LIMIT 30;
 ```
 
 Uma linha `review` deve ser reconciliada; não altere para `pending` sem conferir
@@ -61,9 +105,10 @@ se o Telegram já realizou o efeito.
 
 ## Rollback
 
-1. Enviar `desligar atendimento`, `desligar botson` e `desligar radar`.
+1. Enviar `desligar atendimento`, `desligar atendimento grupos`,
+   `desligar botson` e `desligar radar`.
 2. Aguardar `Sessão única: offline`.
-3. Reimplantar `65ce874`.
+3. Reimplantar o commit de rollback definido para a release.
 4. Manter as tabelas novas; elas são aditivas.
-5. Se for indispensável voltar ao runner separado, gerar/usar uma sessão
+5. Se for indispensável voltar a um runner separado, gerar/usar uma sessão
    exclusiva dele, nunca a mesma do monólito.
