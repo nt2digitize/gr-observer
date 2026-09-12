@@ -25,6 +25,9 @@ ON CONFLICT(module_id) DO NOTHING;
 INSERT INTO module_control(module_id, enabled, reason)
 VALUES('pv_reply', FALSE, 'Desligado por padrão; requer ativação consciente')
 ON CONFLICT(module_id) DO NOTHING;
+INSERT INTO module_control(module_id, enabled, reason)
+VALUES('group_reply', FALSE, 'Desligado por padrão; configure a allowlist ou autorize por postagem manual')
+ON CONFLICT(module_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS chats (
   chat_id BIGINT PRIMARY KEY,
@@ -52,6 +55,23 @@ CREATE TABLE IF NOT EXISTS group_repost_state (
   repost_pending BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS group_reply_events (
+  chat_id BIGINT NOT NULL,
+  message_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  matched_text TEXT,
+  reply_text TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  outbound_message_id BIGINT,
+  cooldown_seconds INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ,
+  PRIMARY KEY(chat_id,message_id)
+);
+ALTER TABLE group_reply_events ADD COLUMN IF NOT EXISTS cooldown_seconds INTEGER;
+CREATE INDEX IF NOT EXISTS group_reply_sent_idx
+ON group_reply_events(chat_id,status,sent_at DESC);
 
 CREATE TABLE IF NOT EXISTS link_targets (
   id BIGSERIAL PRIMARY KEY,
@@ -183,7 +203,7 @@ CREATE TABLE IF NOT EXISTS pv_reply_contacts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Optional, independent post-link branch.  It does not alter the primary PV
+-- Optional, independent post-link branch. It does not alter the primary PV
 -- cadence and stores classifications only, never incoming message text.
 CREATE TABLE IF NOT EXISTS pv_two_screens_sessions (
   user_id BIGINT PRIMARY KEY REFERENCES pv_reply_contacts(user_id) ON DELETE CASCADE,
