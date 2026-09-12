@@ -28,6 +28,7 @@ LIVE_REMARKETING_DELAY_SECONDS = 10 * 60
 TWO_SCREENS_PROMPT_DELAY_SECONDS = 20
 TWO_SCREENS_BALLOON_DELAY_RANGE_SECONDS = (5, 8)
 TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS = (4, 7)
+TWO_SCREENS_PHOTO_TTL_SECONDS = 30
 
 
 def classify_response(text: str) -> str:
@@ -593,11 +594,13 @@ class PvReplyModule:
             advanced = await self.storage.mark_two_screens_photo_sent(peer, slot)
             return {"sent": True, "advanced": advanced, "slot": slot, **result}
 
-        photo = await effects.forward_message(
+        photo = await effects.send_catalogued_media(
             int(media["source_peer"]),
             int(media["source_message_id"]),
             peer,
             f"{action['action_key']}:photo",
+            spoiler=True,
+            ttl_seconds=TWO_SCREENS_PHOTO_TTL_SECONDS,
         )
         caption = await effects.send_text(
             peer,
