@@ -1,6 +1,6 @@
 """Stable module and text-command catalog.
 
-Dictionary insertion order is the operator-visible order.  IDs are stable and
+Dictionary insertion order is the operator-visible order. IDs are stable and
 may be stored in the database; display labels and aliases may evolve without
 changing the underlying operation.
 """
@@ -20,6 +20,7 @@ CATEGORIES = {
     "core": {"order": 10, "label": "Sistema"},
     "radar": {"order": 20, "label": "Radar"},
     "pv_reply": {"order": 30, "label": "Atendimento PV"},
+    "group_reply": {"order": 35, "label": "Atendimento de Grupos"},
     "botson": {"order": 40, "label": "Testar BOTSON"},
 }
 
@@ -195,6 +196,15 @@ MODULES = {
         "default_enabled": False,
         "active_writes": True,
     },
+    "group_reply": {
+        "order": 25,
+        "dispatch_order": 25,
+        "label": "Atendimento de Grupos",
+        "description": "Responde pedidos autorizados e mantém o texto manual visível após cada 10 mensagens novas.",
+        "initial_reason": "Desligado por padrão; configure a allowlist ou autorize por postagem manual",
+        "default_enabled": False,
+        "active_writes": True,
+    },
     "botson": {
         "order": 30,
         "dispatch_order": 10,
@@ -263,6 +273,27 @@ COMMANDS = {
         "surfaces": ("panel",),
         "triggers": ("ver mensagens pv", "/mensagens_pv"),
         "help": "conferir textos e intervalos do atendimento",
+    },
+    "group_reply.enable": {
+        "order": 81,
+        "module": "group_reply",
+        "surfaces": ("panel",),
+        "triggers": ("ligar atendimento grupos", "/ligar_grupos"),
+        "help": "ligar respostas nos grupos autorizados",
+    },
+    "group_reply.disable": {
+        "order": 82,
+        "module": "group_reply",
+        "surfaces": ("panel",),
+        "triggers": ("desligar atendimento grupos", "/desligar_grupos"),
+        "help": "desligar respostas nos grupos",
+    },
+    "group_reply.preview": {
+        "order": 83,
+        "module": "group_reply",
+        "surfaces": ("panel",),
+        "triggers": ("ver atendimento grupos", "/atendimento_grupos"),
+        "help": "ver grupos, atraso, cooldown e respostas",
     },
     "botson.enable": {
         "order": 90,
