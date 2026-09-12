@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import re
 
 from ..catalog import (
     CAMPAIGNS,
@@ -15,6 +14,11 @@ from ..catalog import (
     PV_GREETING_VARIANTS,
     PV_RESPONSE_RULES,
     normalize_text,
+)
+from ..pv_photo_flow import (
+    PvPhotoFlowStore,
+    caption_for_slot,
+    classify_photo_preference,
 )
 
 log = logging.getLogger("gr-observer.pv-reply")
@@ -63,31 +67,8 @@ def classify_two_screens_response(text: str) -> str:
 
 
 def classify_two_screens_choice(text: str) -> str | None:
-    """Return the media slot that best matches the user's stated preference.
-
-    Whole-word aliases avoid false positives such as ``cu`` inside unrelated
-    words. If a sentence mentions more than one option, the last explicit
-    preference wins, which handles a change of mind naturally.
-    """
-    normalized = normalize_text(text)
-    aliases = {
-        "peitos": ("peito", "peitos", "teta", "tetas"),
-        "buceta": ("buceta", "xereca", "xana", "ppk", "vagina"),
-        "cu": ("cu", "cuzinho", "rabinho", "rabo", "bunda", "anal"),
-    }
-    best: tuple[int, int, str] | None = None
-    for slot, values in aliases.items():
-        for alias in values:
-            matches = list(
-                re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", normalized)
-            )
-            if not matches:
-                continue
-            last = matches[-1]
-            candidate = (last.end(), len(alias), slot)
-            if best is None or candidate[:2] > best[:2]:
-                best = candidate
-    return best[2] if best else None
+    """Compatibility wrapper around the simple three-slot preference parser."""
+    return classify_photo_preference(text)
 
 
 def stable_delay_seconds(key: str, minimum: int, maximum: int) -> int:
@@ -162,6 +143,7 @@ class PvReplyModule:
     def __init__(self, storage, settings):
         self.storage = storage
         self.settings = settings
+        self.photo_flow = PvPhotoFlowStore(storage.pool)
         self.client = None
         self.me = None
 
@@ -237,10 +219,40 @@ class PvReplyModule:
         sender_id = int(sender.id)
         if self.me is not None and sender_id == int(self.me.id):
             return False
-        two_screens_response_kind = classify_two_screens_response(event.raw_text or "")
-        # In the active two-screens branch, a plain "não" answers only
-        # "Faz duas telas?". It must still advance to the preference question.
-        # Explicit stop language continues to be handled as opt-out.
+
+        raw_text = event.raw_text or ""
+        response_kind = classify_response(raw_text)
+        live_response_kind = classify_live_response(raw_text)
+        choice = classify_two_screens_choice(raw_text)
+
+        # Once the preference question is visible, this branch owns the next
+        # private reply.  Ambiguous replies deliberately fall back to one of
+        # the not-yet-sent slots.  Explicit opt-out still goes through the
+        # primary PV state machine below and stops all automation.
+        if (
+            self.settings.pv_two_screens_enabled
+            and response_kind != "opt_out"
+            and live_response_kind != "opt_out"
+            and await self.photo_flow.is_waiting_choice(sender_id)
+        ):
+            result = await self.photo_flow.accept_choice(
+                event_key=self._event_key(event),
+                user_id=sender_id,
+                message_id=int(event.id),
+                username=getattr(sender, "username", None),
+                display_name=display_name(sender),
+                requested_slot=choice,
+                first_photo_delay_seconds=stable_delay_seconds(
+                    f"two-screens-photo:{sender_id}:{event.id}",
+                    *TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
+                ),
+            )
+            if result != "ignored":
+                return False
+
+        two_screens_response_kind = classify_two_screens_response(raw_text)
+        # Compatibility for sessions created before the simplified prompt:
+        # a plain "não" must not strand the old awaiting_optin state.
         if self.settings.pv_two_screens_enabled and two_screens_response_kind == "negative":
             two_screens_response_kind = "positive"
         await self.storage.accept_pv_message(
@@ -249,10 +261,10 @@ class PvReplyModule:
             message_id=int(event.id),
             username=getattr(sender, "username", None),
             display_name=display_name(sender),
-            response_kind=classify_response(event.raw_text or ""),
-            live_response_kind=classify_live_response(event.raw_text or ""),
+            response_kind=response_kind,
+            live_response_kind=live_response_kind,
             two_screens_response_kind=two_screens_response_kind,
-            two_screens_choice=classify_two_screens_choice(event.raw_text or ""),
+            two_screens_choice=choice,
             two_screens_photo_delay_seconds=stable_delay_seconds(
                 f"two-screens-photo:{sender_id}:{event.id}",
                 *TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
@@ -299,9 +311,10 @@ class PvReplyModule:
                 f"Periodicidade semanal: {self.settings.pv_weekly_interval_hours:g} h",
                 "Resposta positiva encerra sem nova mensagem; resposta negativa recebe o link.",
                 (
-                    "Após o link: ramo opcional ‘Faz duas telas?’ em 20 s; "
-                    "com o ramo ativo, sim ou não seguem para a preferência."
+                    "Após o link: pede ‘duas telas’, pergunta peito/buceta/cuzinho e envia uma foto; "
+                    "se não entender, escolhe uma categoria ainda não enviada."
                 ),
+                "Fotos extras pedidas depois entram uma por vez com 25–35 min entre elas, até três categorias.",
                 "‘Parar’ ou ‘não quero’ encerra tudo.",
             ]
         )
@@ -451,15 +464,25 @@ class PvReplyModule:
         peer = int(action["payload"]["peer"])
         if not await self.storage.two_screens_action_allowed(peer, "prompt_queued"):
             return {"sent": False, "reason": "state_changed"}
-        result = await effects.send_text(
+        request = await effects.send_text(
             peer,
             self.campaign_text("pv.two_screens.prompt"),
-            f"{action['action_key']}:send",
+            f"{action['action_key']}:request",
+        )
+        question = await effects.send_text(
+            peer,
+            DIALOGS["pv.two_screens.preference"],
+            f"{action['action_key']}:preference",
         )
         advanced = await self.storage.advance_two_screens(
-            peer, "prompt_queued", "awaiting_optin"
+            peer, "prompt_queued", "awaiting_choice"
         )
-        return {"sent": True, "advanced": advanced, **result}
+        return {
+            "sent": True,
+            "advanced": advanced,
+            "request": request,
+            "question": question,
+        }
 
     async def action_send_two_screens_question(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
@@ -471,14 +494,11 @@ class PvReplyModule:
                 DIALOGS["pv.two_screens.preference"],
                 f"{action['action_key']}:send",
             )
-            # Accept the preference immediately after the options are visible.
             advanced = await self.storage.advance_two_screens(
                 peer, "question_queued", "awaiting_choice"
             )
             return {"sent": True, "advanced": advanced, **result}
 
-        # Compatibility path for dormant/legacy tests and already-established
-        # behavior while the optional feature is deliberately disabled.
         result = await effects.send_text(
             peer,
             self.campaign_text("pv.two_screens.question"),
@@ -552,19 +572,31 @@ class PvReplyModule:
     async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
         slot = str(action["payload"]["slot"])
+        final = bool(action["payload"].get("final", False))
         if not await self.storage.two_screens_action_allowed(peer, "photo_queued"):
             return {"sent": False, "reason": "state_changed"}
         media = await self.storage.two_screens_media_slot(slot)
         if not media:
             return {"sent": False, "reason": "media_slot_missing", "slot": slot}
-        result = await effects.forward_message(
+        photo = await effects.forward_message(
             int(media["source_peer"]),
             int(media["source_message_id"]),
             peer,
-            f"{action['action_key']}:send",
+            f"{action['action_key']}:photo",
         )
-        advanced = await self.storage.mark_two_screens_photo_sent(peer, slot)
-        return {"sent": True, "advanced": advanced, "slot": slot, **result}
+        caption = await effects.send_text(
+            peer,
+            caption_for_slot(slot),
+            f"{action['action_key']}:caption",
+        )
+        advanced = await self.photo_flow.mark_photo_sent(peer, slot, final=final)
+        return {
+            "sent": True,
+            "advanced": advanced,
+            "slot": slot,
+            "photo": photo,
+            "caption": caption,
+        }
 
     async def action_send_live_invite(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
