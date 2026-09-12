@@ -115,8 +115,10 @@ passar a ser o modelo de republicação. Isso exige que a costela possa ser liga
 mesmo com allowlist vazia.
 
 Eventos e modelos ficam no PostgreSQL. Resposta atrasada e republicação são
-intenções da Outbox. O módulo não faz DDL para se registrar na arquitetura: o
-estado `group_reply` e suas tabelas pertencem ao schema central.
+intenções da Outbox. O estado `group_reply` e as tabelas da função pertencem ao
+schema central. Durante a transição, a costela pode repetir `CREATE IF NOT EXISTS`
+no `on_connect` como verificação idempotente de compatibilidade; isso não registra
+nem compõe a costela e não substitui o schema central como fonte arquitetural.
 
 ## Trava de sessão não é Dual Write
 
