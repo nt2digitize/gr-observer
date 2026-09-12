@@ -2,6 +2,7 @@ import inspect
 import unittest
 
 from gr_observer.modules.pv_reply import PvReplyModule, classify_two_screens_choice
+from gr_observer.outbox import TelegramEffects
 from gr_observer.pv_photo_flow import (
     EXTRA_PHOTO_DELAY_RANGE_SECONDS,
     PHOTO_SLOTS,
@@ -51,6 +52,18 @@ class PvPhotoFlowTests(unittest.TestCase):
         self.assertIn("caption_for_slot", source)
         self.assertIn("mark_photo_sent", source)
         self.assertIn("final=final", source)
+
+    def test_production_photo_uses_writer_spoiler_and_30_second_ttl(self):
+        source = inspect.getsource(PvReplyModule.action_send_two_screens_photo)
+        self.assertIn("send_catalogued_media", source)
+        self.assertIn("spoiler=True", source)
+        self.assertIn("ttl_seconds=TWO_SCREENS_PHOTO_TTL_SECONDS", source)
+
+    def test_writer_media_effect_has_ttl_fallback_without_losing_spoiler(self):
+        source = inspect.getsource(TelegramEffects.send_catalogued_media)
+        self.assertIn('"TTL_MEDIA_INVALID"', source)
+        self.assertIn("build_media(None)", source)
+        self.assertIn("media.spoiler = bool(spoiler)", source)
 
 
 if __name__ == "__main__":
