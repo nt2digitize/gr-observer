@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 from urllib.parse import urlparse
 
@@ -185,11 +186,14 @@ class ControlPanel:
                 await event.answer("⚠️ referência inválida — recadastre", alert=True)
                 await self.show_two_screens_media(event)
                 return
+            preview_file = io.BytesIO(media_bytes)
+            preview_file.name = f"{slot}.jpg"
             await event.answer()
             await self.client.send_file(
                 self.app.admin_id,
-                media_bytes,
+                preview_file,
                 caption=f"👁 {slot}",
+                force_document=False,
             )
             return
         slot_match = re.fullmatch(r"pv:two_screens:slot:(peitos|buceta|cu)", data)
@@ -591,7 +595,7 @@ class ControlPanel:
             )
             link_rows = await self.app.pool.fetch(
                 """SELECT id,COALESCE(title,url) label,'link' item_type FROM link_targets
-                   WHERE disposition='discarded' ORDER BY first_seen DESC"""
+                   WHERE disposition='discarded' ORDER BY first_seen DESC""",
             )
             all_rows = [dict(row) for row in chat_rows] + [dict(row) for row in link_rows]
             rows = all_rows[offset : offset + limit]
