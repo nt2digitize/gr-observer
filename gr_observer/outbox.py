@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from telethon import errors, functions
+from telethon import errors, functions, utils
 
 log = logging.getLogger("gr-observer.outbox")
 
@@ -240,6 +240,86 @@ class TelegramEffects:
                 "destination_peer": str(destination_peer),
             },
             forward,
+        )
+
+    async def send_catalogued_media(
+        self,
+        source_peer,
+        message_id: int,
+        destination_peer,
+        effect_key: str,
+        *,
+        spoiler: bool = True,
+        ttl_seconds: int | None = 30,
+    ) -> dict[str, Any]:
+        """Copy catalogued Telegram media with spoiler and optional self-destruct TTL."""
+        random_id = stable_random_id(effect_key)
+        requested_ttl = (
+            None
+            if ttl_seconds is None
+            else max(1, min(60, int(ttl_seconds)))
+        )
+
+        async def send():
+            source_message = await self.client.get_messages(
+                source_peer, ids=int(message_id)
+            )
+            source_media = getattr(source_message, "media", None)
+            if source_message is None or source_media is None:
+                raise ValueError("mídia cadastrada não encontrada no Telegram")
+
+            input_peer = await self.client.get_input_entity(destination_peer)
+
+            def build_media(ttl: int | None):
+                media = utils.get_input_media(source_media, ttl=ttl)
+                if not hasattr(media, "spoiler"):
+                    raise TypeError("mídia cadastrada não suporta spoiler")
+                media.spoiler = bool(spoiler)
+                return media
+
+            async def send_request(media):
+                if self.before_user_write is not None:
+                    await self.before_user_write()
+                return await self.client(
+                    functions.messages.SendMediaRequest(
+                        peer=input_peer,
+                        media=media,
+                        message="",
+                        random_id=random_id,
+                    )
+                )
+
+            used_ttl = requested_ttl
+            try:
+                result = await send_request(build_media(requested_ttl))
+            except errors.BadRequestError as exc:
+                # A rejected TTL request is known not to have produced a send,
+                # so it is safe to retry once without TTL while preserving spoiler.
+                if requested_ttl is None or "TTL_MEDIA_INVALID" not in str(exc).upper():
+                    raise
+                used_ttl = None
+                result = await send_request(build_media(None))
+
+            return {
+                "message_id": sent_message_id(result),
+                "source_message_id": int(message_id),
+                "random_id": random_id,
+                "spoiler": bool(spoiler),
+                "ttl_seconds": used_ttl,
+            }
+
+        return await self.perform(
+            effect_key,
+            "send_catalogued_media",
+            {
+                "source_peer": str(source_peer),
+                "message_id": int(message_id),
+                "destination_peer": str(destination_peer),
+                "spoiler": bool(spoiler),
+                "ttl_seconds": requested_ttl,
+                "random_id": random_id,
+            },
+            send,
         )
 
 
