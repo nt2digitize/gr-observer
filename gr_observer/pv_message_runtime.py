@@ -20,8 +20,7 @@ from .modules.pv_reply import (
 from .pv_message_steps import has_link, pre_send_wait_seconds, stable_delay_seconds
 
 log = logging.getLogger("gr-observer.pv-messages")
-INLINE_PREWAIT_TOLERANCE_SECONDS = 0.75
-DecimalZero = "0"
+ZERO_POSITION = "0"
 
 
 def _json(value: Any) -> str:
@@ -62,6 +61,7 @@ class PvMessageRuntimeMixin:
         return result
 
     async def _retime_event_actions(self, event) -> None:
+        """Retiming is limited to intents created by this same inbound event."""
         event_key = self._event_key(event)
         peer = int(event.sender_id)
         await self._retime_pending_action(
@@ -72,7 +72,8 @@ class PvMessageRuntimeMixin:
         )
         if classify_response(event.raw_text or "") == "negative":
             cycle = await self.storage.pool.fetchval(
-                "SELECT weekly_cycle FROM pv_reply_contacts WHERE user_id=$1 AND stage='weekly'",
+                """SELECT weekly_cycle FROM pv_reply_contacts
+                   WHERE user_id=$1 AND stage='weekly'""",
                 peer,
             )
             if cycle is not None:
@@ -80,10 +81,20 @@ class PvMessageRuntimeMixin:
                     f"pv_reply:conditional-link:{peer}:weekly:{int(cycle)}",
                     "reminder_link",
                 )
+        question_block = (
+            "two_screens_preference"
+            if self.settings.pv_two_screens_enabled
+            else "two_screens_question"
+        )
+        retry_block = (
+            "two_screens_retry_preference"
+            if self.settings.pv_two_screens_enabled
+            else "two_screens_retry"
+        )
         for action_type, block in (
             ("send_live_link", "live_link"),
-            ("send_two_screens_question", "two_screens_question"),
-            ("send_two_screens_retry", "two_screens_retry"),
+            ("send_two_screens_question", question_block),
+            ("send_two_screens_retry", retry_block),
         ):
             row = await self.storage.pool.fetchrow(
                 """SELECT action_key FROM outbox_actions
@@ -97,7 +108,13 @@ class PvMessageRuntimeMixin:
             if row:
                 await self._retime_pending_action(str(row["action_key"]), block)
 
-    async def _first_step_plan(self, block_key: str, stable_key: str, *, extra_seconds: int = 0):
+    async def _first_step_plan(
+        self,
+        block_key: str,
+        stable_key: str,
+        *,
+        extra_seconds: int = 0,
+    ):
         await self.message_store.ensure_ready()
         branch = await self.message_store.choose_branch(block_key, stable_key)
         row = await self.message_store.first_step(block_key, branch)
@@ -113,7 +130,13 @@ class PvMessageRuntimeMixin:
         )
         return branch, row, prewait, typing
 
-    async def _retime_pending_action(self, action_key: str, block_key: str, *, extra_seconds: int = 0) -> None:
+    async def _retime_pending_action(
+        self,
+        action_key: str,
+        block_key: str,
+        *,
+        extra_seconds: int = 0,
+    ) -> None:
         _, row, prewait, _ = await self._first_step_plan(
             block_key, action_key, extra_seconds=extra_seconds
         )
@@ -127,16 +150,25 @@ class PvMessageRuntimeMixin:
             float(max(0.0, prewait)),
         )
 
-    async def _next_block_wait(self, block_key: str, stable_key: str, *, extra_seconds: int = 0) -> int:
+    async def _next_block_wait(
+        self,
+        block_key: str,
+        stable_key: str,
+        *,
+        extra_seconds: int = 0,
+    ) -> int:
         _, _, prewait, _ = await self._first_step_plan(
             block_key, stable_key, extra_seconds=extra_seconds
         )
         return max(0, int(math.ceil(prewait)))
 
     async def _show_typing(self, effects, peer: int, seconds: float) -> None:
+        """Short, best-effort typing phase inside the one active Writer."""
         if seconds <= 0:
             return
         try:
+            if effects.before_user_write is not None:
+                await effects.before_user_write()
             input_peer = await effects.client.get_input_entity(peer)
             await effects.client(
                 functions.messages.SetTypingRequest(
@@ -148,7 +180,15 @@ class PvMessageRuntimeMixin:
             log.debug("Indicador digitando indisponível peer=%s: %s", peer, exc)
         await asyncio.sleep(min(8.0, max(0.0, float(seconds))))
 
-    async def _send_row(self, *, effects, peer: int, row, origin_key: str, variables: dict) -> dict:
+    async def _send_row(
+        self,
+        *,
+        effects,
+        peer: int,
+        row,
+        origin_key: str,
+        variables: dict,
+    ) -> dict:
         text = self.message_store.render(
             str(row["content"]),
             preview_link=self.settings.pv_preview_link,
@@ -194,7 +234,8 @@ class PvMessageRuntimeMixin:
         ).hexdigest()[:24]
         action_key = f"pv_reply:message-step:{digest}"
         inserted = await self.storage.pool.fetchval(
-            """INSERT INTO outbox_actions(action_key,module_id,action_type,payload,available_at)
+            """INSERT INTO outbox_actions(
+               action_key,module_id,action_type,payload,available_at)
                VALUES($1,'pv_reply','send_message_step',$2::jsonb,
                  NOW()+($3::double precision*INTERVAL '1 second'))
                ON CONFLICT(action_key) DO NOTHING RETURNING id""",
@@ -235,7 +276,6 @@ class PvMessageRuntimeMixin:
         first = await self.message_store.first_step(block_key, branch)
         if first is None:
             return await self._complete_sequence(continuation, context, effects)
-
         if not first_delay_applied:
             rendered = self.message_store.render(
                 str(first["content"]),
@@ -249,13 +289,13 @@ class PvMessageRuntimeMixin:
             prewait, _ = pre_send_wait_seconds(
                 total, rendered, f"{origin_key}:step:{first['id']}"
             )
-            if prewait > INLINE_PREWAIT_TOLERANCE_SECONDS:
+            if prewait > 0:
                 await self._queue_sequence_continuation(
                     peer=peer,
                     origin_key=origin_key,
                     block_key=block_key,
                     branch_key=branch,
-                    after_position=DecimalZero,
+                    after_position=ZERO_POSITION,
                     continuation=continuation,
                     context=context,
                     variables=variables,
@@ -266,7 +306,6 @@ class PvMessageRuntimeMixin:
                     "queued": True,
                     "reason": "first_step_delayed",
                 }
-
         sent = await self._send_row(
             effects=effects,
             peer=peer,
@@ -325,10 +364,10 @@ class PvMessageRuntimeMixin:
                 f"{origin_key}:step:{nxt['id']}",
                 int(nxt["median_delay_seconds"]),
             )
-            prewait, typing = pre_send_wait_seconds(
+            prewait, _ = pre_send_wait_seconds(
                 total, rendered, f"{origin_key}:step:{nxt['id']}"
             )
-            if prewait > INLINE_PREWAIT_TOLERANCE_SECONDS:
+            if prewait > 0:
                 queued = await self._queue_sequence_continuation(
                     peer=peer,
                     origin_key=origin_key,
@@ -345,8 +384,6 @@ class PvMessageRuntimeMixin:
                     "steps": results,
                     "queued": queued,
                 }
-            if prewait > 0 and typing > 0:
-                await self._show_typing(effects, peer, prewait)
             item = await self._send_row(
                 effects=effects,
                 peer=peer,
@@ -358,6 +395,7 @@ class PvMessageRuntimeMixin:
             current = nxt
 
     async def action_send_message_step(self, action: dict, effects) -> dict:
+        """Resolve current next row; a deleted pending row is simply skipped."""
         payload = action["payload"]
         peer = int(payload["peer"])
         block_key = str(payload["block_key"])
@@ -391,7 +429,9 @@ class PvMessageRuntimeMixin:
             sent=sent,
         )
 
-    async def _complete_sequence(self, continuation: str, context: dict, effects) -> dict:
+    async def _complete_sequence(
+        self, continuation: str, context: dict, effects
+    ) -> dict:
         peer = int(context.get("peer", 0))
         if continuation == "none":
             return {"advanced": False}
@@ -459,7 +499,7 @@ class PvMessageRuntimeMixin:
         if continuation == "weekly":
             cycle = int(context["cycle"])
             delay = await self._next_block_wait(
-                "weekly", f"pv_reply:weekly-question:{peer}:{cycle+1}"
+                "weekly", f"pv_reply:weekly-question:{peer}:{cycle + 1}"
             )
             advanced = await self.storage.complete_pv_weekly_and_schedule_next(
                 user_id=peer, completed_cycle=cycle, delay_seconds=delay
@@ -523,9 +563,23 @@ class PvMessageRuntimeMixin:
                     peer, "question_queued", "awaiting_choice"
                 )
             return {"advanced": advanced}
+        if continuation == "two_question_legacy":
+            delay = await self._next_block_wait(
+                "two_screens_limit", f"pv_reply:two-screens:limit:{peer}"
+            )
+            advanced = await self.storage.queue_next_two_screens_action(
+                peer,
+                expected="question_queued",
+                next_status="limit_queued",
+                action_type="send_two_screens_limit",
+                action_key=f"pv_reply:two-screens:limit:{peer}",
+                delay_seconds=delay,
+            )
+            return {"advanced": advanced}
         if continuation == "two_limit":
             delay = await self._next_block_wait(
-                "two_screens_followup", f"pv_reply:two-screens:followup:{peer}"
+                "two_screens_followup",
+                f"pv_reply:two-screens:followup:{peer}",
             )
             advanced = await self.storage.queue_next_two_screens_action(
                 peer,
@@ -627,9 +681,7 @@ class PvMessageRuntimeMixin:
     async def action_send_live_invite(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
         campaign_id = int(action["payload"]["campaign_id"])
-        if not await self.storage.live_recipient_allowed(
-            campaign_id, peer, "queued"
-        ):
+        if not await self.storage.live_recipient_allowed(campaign_id, peer, "queued"):
             return {"sent": False, "reason": "state_changed"}
         return await self._run_block(
             action=action,
@@ -678,9 +730,7 @@ class PvMessageRuntimeMixin:
         peer = int(action["payload"]["peer"])
         if not await self._contact_allows_automation(peer):
             return {"sent": False, "reason": "contact_stopped"}
-        if not await self.storage.two_screens_action_allowed(
-            peer, "prompt_queued"
-        ):
+        if not await self.storage.two_screens_action_allowed(peer, "prompt_queued"):
             return {"sent": False, "reason": "state_changed"}
         return await self._run_block(
             action=action,
@@ -694,37 +744,23 @@ class PvMessageRuntimeMixin:
         peer = int(action["payload"]["peer"])
         if not await self._contact_allows_automation(peer):
             return {"sent": False, "reason": "contact_stopped"}
-        if not await self.storage.two_screens_action_allowed(
-            peer, "question_queued"
-        ):
+        if not await self.storage.two_screens_action_allowed(peer, "question_queued"):
             return {"sent": False, "reason": "state_changed"}
         if self.settings.pv_two_screens_enabled:
             return await self._run_block(
                 action=action,
                 effects=effects,
-                block_key="two_screens_question",
+                block_key="two_screens_preference",
                 continuation="two_question",
                 context={"peer": peer},
             )
-        sent = await self._run_block(
+        return await self._run_block(
             action=action,
             effects=effects,
             block_key="two_screens_question",
-            continuation="none",
+            continuation="two_question_legacy",
             context={"peer": peer},
         )
-        delay = await self._next_block_wait(
-            "two_screens_limit", f"pv_reply:two-screens:limit:{peer}"
-        )
-        advanced = await self.storage.queue_next_two_screens_action(
-            peer,
-            expected="question_queued",
-            next_status="limit_queued",
-            action_type="send_two_screens_limit",
-            action_key=f"pv_reply:two-screens:limit:{peer}",
-            delay_seconds=delay,
-        )
-        return {**sent, "advanced": advanced}
 
     async def action_send_two_screens_limit(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
@@ -744,9 +780,7 @@ class PvMessageRuntimeMixin:
         peer = int(action["payload"]["peer"])
         if not await self._contact_allows_automation(peer):
             return {"sent": False, "reason": "contact_stopped"}
-        if not await self.storage.two_screens_action_allowed(
-            peer, "followup_queued"
-        ):
+        if not await self.storage.two_screens_action_allowed(peer, "followup_queued"):
             return {"sent": False, "reason": "state_changed"}
         return await self._run_block(
             action=action,
@@ -760,14 +794,17 @@ class PvMessageRuntimeMixin:
         peer = int(action["payload"]["peer"])
         if not await self._contact_allows_automation(peer):
             return {"sent": False, "reason": "contact_stopped"}
-        if not await self.storage.two_screens_action_allowed(
-            peer, "awaiting_choice"
-        ):
+        if not await self.storage.two_screens_action_allowed(peer, "awaiting_choice"):
             return {"sent": False, "reason": "state_changed"}
+        block = (
+            "two_screens_retry_preference"
+            if self.settings.pv_two_screens_enabled
+            else "two_screens_retry"
+        )
         return await self._run_block(
             action=action,
             effects=effects,
-            block_key="two_screens_retry",
+            block_key=block,
             continuation="none",
             context={"peer": peer},
         )
@@ -793,11 +830,10 @@ class PvMessageRuntimeMixin:
             spoiler=True,
             ttl_seconds=30,
         )
-        block = f"photo_caption_{slot}"
         caption = await self._run_block(
             action=action,
             effects=effects,
-            block_key=block,
+            block_key=f"photo_caption_{slot}",
             continuation="photo_caption",
             context={"peer": peer, "slot": slot, "final": final},
             first_delay_applied=False,
