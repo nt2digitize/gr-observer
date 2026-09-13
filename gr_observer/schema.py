@@ -93,6 +93,20 @@ ALTER TABLE group_reply_events ADD COLUMN IF NOT EXISTS cooldown_seconds INTEGER
 CREATE INDEX IF NOT EXISTS group_reply_sent_idx
 ON group_reply_events(chat_id,status,sent_at DESC);
 
+CREATE TABLE IF NOT EXISTS group_protected_messages (
+  chat_id BIGINT NOT NULL,
+  message_id BIGINT NOT NULL,
+  protected_until TIMESTAMPTZ NOT NULL,
+  protection_version INTEGER NOT NULL DEFAULT 1,
+  last_interaction_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reason TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(chat_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS group_protected_until_idx
+ON group_protected_messages(protected_until);
+
 CREATE TABLE IF NOT EXISTS link_targets (
   id BIGSERIAL PRIMARY KEY,
   url TEXT NOT NULL UNIQUE,
@@ -163,6 +177,38 @@ CREATE TABLE IF NOT EXISTS drafts (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS contact_ledger (
+  user_id BIGINT PRIMARY KEY,
+  username TEXT,
+  display_name TEXT,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  first_private_contact_at TIMESTAMPTZ,
+  last_private_contact_at TIMESTAMPTZ,
+  first_source_chat_id BIGINT,
+  last_source_chat_id BIGINT,
+  last_source_message_id BIGINT,
+  last_source_type TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS contact_account_state (
+  account_user_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL REFERENCES contact_ledger(user_id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'observed'
+    CHECK(status IN (
+      'observed','save_queued','saved','already_saved',
+      'save_failed','review','historical_unreachable'
+    )),
+  saved_at TIMESTAMPTZ,
+  last_attempt_at TIMESTAMPTZ,
+  last_error TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(account_user_id,user_id)
+);
+CREATE INDEX IF NOT EXISTS contact_account_state_status_idx
+ON contact_account_state(account_user_id,status,updated_at DESC);
 
 -- Inbox deduplicates an inbound Telegram update before it can create work.
 CREATE TABLE IF NOT EXISTS inbox_events (
