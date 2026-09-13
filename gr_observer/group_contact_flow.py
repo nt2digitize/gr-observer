@@ -17,7 +17,7 @@ from .outbox import sent_message_id, stable_random_id
 
 ADD_INTENT_RE = re.compile(
     r"(?:\badd\b|\badiciona(?:r)?\b|\bme\s+adiciona\b|\bsalva(?:r)?\b|"
-    r"\b(?:to|tô|estou)\s+de\s+ban\b|\bnao\s+consigo\s+chamar\b)",
+    r"\b(?:to|tô|estou)\s+de\s+ban\b|\b(?:nao|não)\s+consigo\s+chamar\b)",
     re.I,
 )
 ADD_REPLY_TEXT = "já add, chama lá"
