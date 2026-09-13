@@ -62,20 +62,14 @@ class FeatureFlagTests(unittest.TestCase):
 
 class ContactLedgerEffectTests(unittest.IsolatedAsyncioTestCase):
     async def test_add_contact_uses_user_effect_without_phone_sharing(self):
-        pool = SimpleNamespace(
-            execute=AsyncMock(),
-            fetchval=AsyncMock(return_value="save_queued"),
-        )
+        pool = SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value="save_queued"))
         ledger = ContactLedger(pool)
         ledger.account_user_id = 999
 
         class FakeClient:
-            def __init__(self):
-                self.request = None
-
+            def __init__(self): self.request = None
             async def get_input_entity(self, _peer):
                 return types.InputPeerUser(user_id=42, access_hash=123456)
-
             async def __call__(self, request):
                 self.request = request
                 return SimpleNamespace()
@@ -87,25 +81,14 @@ class ContactLedgerEffectTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.client = client
                 self.before_user_write = before_write
-
             async def perform(self, _key, _effect_type, _payload, operation):
                 return await operation()
 
-        result = await ledger.save_with_effects(
-            {
-                "action_key": "contact-save:999:42:test",
-                "payload": {
-                    "peer": 42,
-                    "account_user_id": 999,
-                    "username": "teste",
-                    "display_name": "Pessoa Teste",
-                    "first_name": "Pessoa",
-                    "last_name": "Teste",
-                },
-            },
-            FakeEffects(),
-        )
-
+        result = await ledger.save_with_effects({
+            "action_key": "contact-save:999:42:test",
+            "payload": {"peer": 42, "account_user_id": 999, "username": "teste",
+                        "display_name": "Pessoa Teste", "first_name": "Pessoa", "last_name": "Teste"},
+        }, FakeEffects())
         self.assertTrue(result["saved"])
         self.assertIsInstance(client.request, functions.contacts.AddContactRequest)
         self.assertEqual(client.request.phone, "")
@@ -119,11 +102,7 @@ class KillSwitchTests(unittest.IsolatedAsyncioTestCase):
         module = PvReplyWithContacts(storage, SimpleNamespace())
         module.auto_save_contacts = False
         module.contact_ledger.save_with_effects = AsyncMock()
-
-        result = await module.action_ensure_contact_saved(
-            {"payload": {"peer": 42}}, SimpleNamespace()
-        )
-
+        result = await module.action_ensure_contact_saved({"payload": {"peer": 42}}, SimpleNamespace())
         self.assertEqual(result["reason"], "feature_disabled")
         module.contact_ledger.save_with_effects.assert_not_awaited()
 
@@ -133,48 +112,44 @@ class KillSwitchTests(unittest.IsolatedAsyncioTestCase):
         module = GroupReplyWithContacts(storage, SimpleNamespace())
         module.contact_flow.add_enabled = False
         module.contact_flow.action_add_contact_reply = AsyncMock()
-
-        result = await module.action_group_add_contact_reply(
-            {"payload": {"peer": -100}}, SimpleNamespace()
-        )
-
+        result = await module.action_group_add_contact_reply({"payload": {"peer": -100}}, SimpleNamespace())
         self.assertEqual(result["reason"], "feature_disabled")
         module.contact_flow.action_add_contact_reply.assert_not_awaited()
+
+
+class ProtectionAttributionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bare_mention_does_not_protect_current_loop_post(self):
+        flow = GroupContactFlow(SimpleNamespace())
+        flow.me = SimpleNamespace(id=999, username="RadarTeste")
+        flow.add_enabled = False
+        flow.protection_enabled = True
+        flow._reply_context = AsyncMock(return_value=(False, None))
+        flow._current_repost_message = AsyncMock(return_value=10)
+        flow._protect_message = AsyncMock()
+        event = SimpleNamespace(chat_id=-1001, raw_text="@RadarTeste você é do RJ?", id=77)
+        sender = SimpleNamespace(id=42)
+        await flow.observe_event(event, sender, module_id="group_reply")
+        flow._protect_message.assert_not_awaited()
+        flow._current_repost_message.assert_not_awaited()
 
 
 class ProtectedRepostTests(unittest.IsolatedAsyncioTestCase):
     async def test_repost_keeps_old_copy_when_engagement_is_protected(self):
         pool = SimpleNamespace(
-            fetchrow=AsyncMock(
-                return_value={
-                    "template_text": "meu texto",
-                    "current_message_id": 10,
-                    "template_version": 3,
-                    "repost_pending": True,
-                    "repost_approved_at": None,
-                }
-            ),
-            fetchval=AsyncMock(return_value=3),
-            execute=AsyncMock(),
+            fetchrow=AsyncMock(return_value={"template_text": "meu texto", "current_message_id": 10,
+                                             "template_version": 3, "repost_pending": True,
+                                             "repost_approved_at": None}),
+            fetchval=AsyncMock(return_value=3), execute=AsyncMock(),
         )
         module = GroupReplyWithContacts(SimpleNamespace(pool=pool), SimpleNamespace())
         module._reply_blocks_repost = AsyncMock(return_value=False)
         module.contact_flow.is_message_protected = AsyncMock(return_value=True)
         module.contact_flow.clear_protection = AsyncMock()
         module._mark_automated_outbound = lambda *_args: None
-
-        effects = SimpleNamespace(
-            send_text=AsyncMock(return_value={"message_id": 20}),
-            delete_messages=AsyncMock(return_value={"deleted": True}),
-        )
+        effects = SimpleNamespace(send_text=AsyncMock(return_value={"message_id": 20}),
+                                  delete_messages=AsyncMock(return_value={"deleted": True}))
         result = await module.action_repost_group_text(
-            {
-                "action_key": "repost-1",
-                "payload": {"peer": -1001, "template_version": 3},
-            },
-            effects,
-        )
-
+            {"action_key": "repost-1", "payload": {"peer": -1001, "template_version": 3}}, effects)
         self.assertTrue(result["sent"])
         self.assertFalse(result["deleted"])
         self.assertEqual(result["reason"], "protected_engagement")
