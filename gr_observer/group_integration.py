@@ -9,14 +9,15 @@ remains owned by the application spine.
 from __future__ import annotations
 
 from .catalog import match_command
-from .modules.group_reply import GroupReplyModule
+from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
 
 
 def register_group_reply(application) -> None:
     """Attach the Group Attendance rib to the existing central registry."""
     application.registry.register(
-        "group_reply", GroupReplyModule(application.storage, application.settings)
+        "group_reply",
+        GroupReplyWithContacts(application.storage, application.settings),
     )
 
 
