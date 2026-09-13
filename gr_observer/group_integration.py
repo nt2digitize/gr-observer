@@ -11,6 +11,7 @@ from __future__ import annotations
 from .catalog import match_command
 from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
+from .pv_message_panel import PvMessageEditorPanelMixin
 
 
 def register_group_reply(application) -> None:
@@ -21,8 +22,8 @@ def register_group_reply(application) -> None:
     )
 
 
-class GroupControlPanel(BaseControlPanel):
-    """Panel adapter for the group-specific preview command and toggle callback."""
+class GroupControlPanel(PvMessageEditorPanelMixin, BaseControlPanel):
+    """Panel adapter for group controls plus the PV copy editor surface."""
 
     async def on_message(self, event) -> None:
         if not self.app.is_admin(event):
