@@ -55,6 +55,26 @@ CREATE TABLE IF NOT EXISTS group_repost_state (
   repost_pending BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS last_post_at TIMESTAMPTZ;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS last_human_at TIMESTAMPTZ;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS cycle_target_messages INTEGER;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS cycle_min_interval_seconds INTEGER;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS cycle_planned_at TIMESTAMPTZ;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS cycle_valid_until TIMESTAMPTZ;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS cycle_activity_score DOUBLE PRECISION;
+ALTER TABLE group_repost_state ADD COLUMN IF NOT EXISTS repost_approved_at TIMESTAMPTZ;
+UPDATE group_repost_state
+SET last_post_at=COALESCE(last_post_at,updated_at)
+WHERE last_post_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS group_activity_buckets (
+  chat_id BIGINT NOT NULL,
+  bucket_start TIMESTAMPTZ NOT NULL,
+  human_messages INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(chat_id,bucket_start)
+);
+CREATE INDEX IF NOT EXISTS group_activity_bucket_idx
+ON group_activity_buckets(chat_id,bucket_start DESC);
 
 CREATE TABLE IF NOT EXISTS group_reply_events (
   chat_id BIGINT NOT NULL,
