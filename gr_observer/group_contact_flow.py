@@ -184,18 +184,16 @@ class GroupContactFlow:
         if not engaged:
             return
 
-        if self.protection_enabled:
-            protect_id: int | None = None
-            if reply_to_ours and replied_message_id is not None:
-                if await self._is_repost_message(chat_id, replied_message_id):
-                    protect_id = replied_message_id
-            elif mentioned:
-                protect_id = await self._current_repost_message(chat_id)
-            if protect_id is not None:
+        # Deletion protection requires an unambiguous Telegram relationship:
+        # a direct reply to the loop publication. A bare @mention remains valid
+        # for directed ADD handling, but cannot be safely attributed to whichever
+        # loop post happens to be current and therefore never protects it.
+        if self.protection_enabled and reply_to_ours and replied_message_id is not None:
+            if await self._is_repost_message(chat_id, replied_message_id):
                 await self._protect_message(
                     chat_id=chat_id,
-                    message_id=protect_id,
-                    reason="reply" if reply_to_ours else "mention",
+                    message_id=replied_message_id,
+                    reason="reply",
                     event_id=int(event.id),
                     module_id=module_id,
                 )
