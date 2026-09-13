@@ -13,103 +13,61 @@ Também existe valor em preservar temporariamente uma publicação do loop que e
 
 ## Decisão
 
-A capacidade de contatos é infraestrutura compartilhada pelas costelas existentes `pv_reply` e `group_reply`; ela **não** cria nova costela, sessão, worker ou Writer. Cada costela continua dona das próprias intenções de Outbox.
+A capacidade de contatos é infraestrutura compartilhada pelas costelas existentes `pv_reply` e `group_reply`; ela não cria nova costela, sessão, worker ou Writer. Cada costela continua dona das próprias intenções de Outbox.
 
-São introduzidos dois níveis de estado:
-
-1. `contact_ledger`: memória operacional do projeto sobre usuários observados, sem conteúdo de mensagem e sem descoberta/inferência de telefone;
-2. `contact_account_state`: estado do vínculo daquele usuário com uma conta operadora específica.
-
-Toda mutação Telegram continua atravessando a Outbox única, o Writer serial e `TelegramEffects`.
+São introduzidos `contact_ledger`, memória operacional sem corpo de mensagem nem descoberta de telefone, e `contact_account_state`, estado do vínculo por conta operadora. Toda mutação Telegram continua atravessando a Outbox única, Writer serial e `TelegramEffects`.
 
 ## Salvamento automático no PV
 
-Quando `PV_AUTO_SAVE_CONTACTS=true`, toda mensagem privada recebida de conta elegível gera uma intenção idempotente `ensure_contact_saved`, independente da etapa atual da jornada PV.
-
-- bot, conta apagada, suporte e `777000` continuam excluídos;
-- se o remetente já vier marcado pelo Telegram como contato, apenas o ledger é reconciliado;
-- o telefone não é exigido nem inferido;
-- `add_phone_privacy_exception` permanece desligado: a automação não compartilha nosso telefone para completar a operação;
-- uma falha conclusiva não gera confirmação falsa;
-- um resultado externo incerto segue a semântica de `review` da ADR-003.
+Quando `PV_AUTO_SAVE_CONTACTS=true`, toda mensagem privada recebida de conta elegível gera intenção idempotente `ensure_contact_saved`, independente da etapa da jornada. Bots, contas apagadas, suporte e `777000` permanecem excluídos. Telefone não é exigido nem inferido e `add_phone_privacy_exception` permanece desligado. Falha conclusiva não gera confirmação falsa e resultado externo incerto segue ADR-003.
 
 ## Fluxo ADD nos grupos
 
-Quando `GROUP_ADD_CONTACT_FLOW=true`, o fluxo só nasce se houver contexto dirigido à conta:
+Quando `GROUP_ADD_CONTACT_FLOW=true`, o fluxo exige contexto dirigido à conta — reply a mensagem nossa ou menção explícita ao `@username` — mais intenção compatível como `add`, `me adiciona`, `salva`, `tô de ban` ou equivalente aprovado.
 
-- resposta direta a uma mensagem nossa; ou
-- menção explícita ao nosso `@username`;
+`interação → Outbox 25–35 s → salvar contato → confirmar efeito → responder à mensagem`
 
-mais uma intenção compatível, como `add`, `me adiciona`, `salva`, `tô de ban` ou equivalente aprovado.
-
-A sequência é durável:
-
-`interação → Outbox com atraso estável de 25–35 s → salvar contato → confirmar efeito → responder à mensagem`
-
-A resposta aprovada nesta implantação é:
-
-`já add, chama lá`
-
-A confirmação só é enviada depois de `AddContact` ter sido concluído ou o ledger provar que o usuário já estava salvo. Se a adição falhar, a resposta não é enviada.
+A resposta é `já add, chama lá`, somente após contato confirmado ou já salvo.
 
 ## Proteção de publicação engajada
 
-Quando `GROUP_ENGAGEMENT_PROTECTION=true`, uma publicação corrente do loop que receba resposta direta pode ser protegida contra exclusão. Uma menção explícita pode proteger a publicação corrente do loop quando o contexto não contém `reply_to`.
+Quando `GROUP_ENGAGEMENT_PROTECTION=true`, a proteção contra exclusão exige vínculo inequívoco do Telegram: **reply direto a uma publicação do loop**. Reply a publicação antiga já protegida renova sua janela.
 
-A proteção padrão dura 24 horas e é renovável a partir da interação mais recente. A versão da proteção impede que uma limpeza antiga apague uma publicação cuja janela tenha sido renovada.
+Uma menção solta ao `@username`, sem `reply_to`, continua válida como contexto dirigido para o fluxo ADD, mas **não é atribuída automaticamente ao post corrente do loop** e não cria proteção. Assim, uma pergunta ou menção sem vínculo comprovado não retém publicação antiga.
 
-O loop continua podendo criar uma publicação nova. Se a anterior estiver protegida, ela não é apagada naquele repost. Quando a proteção expira e a publicação já não é a corrente, uma intenção de limpeza atravessa Outbox + Writer + `TelegramEffects`.
+A proteção padrão dura 24 horas e é renovável pela interação mais recente. A versão impede que limpeza antiga apague publicação renovada. O loop pode publicar nova cópia enquanto a anterior protegida permanece. Após expirar, a antiga só é removida se já não for a corrente, via Outbox + Writer + `TelegramEffects`.
 
-Mensagens reativas comuns do atendimento não são automaticamente convertidas em publicações do loop nem entram nessa rotina de limpeza.
+Mensagens reativas comuns do atendimento não viram publicações do loop nem entram na rotina de limpeza.
 
-## Continuidade entre sessão e conta
+## Continuidade, privacidade e persistência
 
-Regenerar a StringSession da **mesma conta** não apaga o ledger nem o estado de contato do projeto.
-
-Uma **conta Telegram diferente** recebe outro `account_user_id`. O ledger antigo permanece como memória histórica, mas não autoriza importação em massa. A nova conta só adiciona automaticamente um usuário quando houver nova interação válida dentro de um fluxo autorizado. Um `user_id` histórico isolado não é tratado como autorização nem como garantia de resolubilidade pela nova conta.
-
-## Privacidade e persistência
-
-O ledger pode guardar:
-
-- `user_id`;
-- `username` quando disponível;
-- nome de exibição;
-- timestamps de primeira/última observação;
-- origem operacional (grupo/PV e IDs de referência);
-- estado de contato por conta operadora.
-
-O corpo de mensagens privadas não é persistido por esta função. Nenhuma tentativa de descobrir telefone é feita.
+Regenerar StringSession da mesma conta não apaga ledger/estado. Conta Telegram diferente recebe outro `account_user_id`; histórico não autoriza importação em massa. O ledger pode guardar IDs, username, nome de exibição, timestamps, origem operacional e estado por conta. Corpo de PV e descoberta de telefone ficam fora.
 
 ## Kill switches e rollout
 
-As três novas capacidades nascem desligadas:
+As capacidades nascem desligadas:
 
 - `PV_AUTO_SAVE_CONTACTS=false`
 - `GROUP_ADD_CONTACT_FLOW=false`
 - `GROUP_ENGAGEMENT_PROTECTION=false`
 
-Ações de salvar contato/ADD ainda pendentes obedecem ao kill switch quando alcançam o Writer. A limpeza de uma proteção já criada continua autorizada mesmo se a criação de novas proteções for desligada, evitando deixar mensagens antigas permanentemente retidas.
+Salvamento/ADD pendentes obedecem ao kill switch na execução. Limpeza de proteção já criada continua autorizada para não reter posts indefinidamente.
 
 ## Invariantes preservados
 
-- uma única sessão Telegram de usuário;
-- um único Writer;
-- uma única Outbox ativa;
-- composição explícita no monólito;
-- nenhuma chamada direta entre costelas;
-- chaves/effects idempotentes;
-- FloodWait X+5;
-- pacing global inalterado;
-- `review` somente para resultado externo realmente ambíguo;
-- falha de um usuário não bloqueia outras lanes/ações prontas.
+- uma sessão Telegram de usuário;
+- um Writer;
+- uma Outbox ativa;
+- nenhuma nova costela/worker/cliente;
+- efeitos idempotentes;
+- FloodWait X+5 e pacing global inalterados;
+- `review` apenas para efeito externo ambíguo;
+- falha de uma lane não bloqueia outras.
 
 ## Homologação
 
-A entrada em produção é progressiva:
-
-1. deploy com as três flags desligadas;
-2. ativar apenas autosalvamento PV e validar com conta de teste;
-3. ativar ADD apenas em grupo autorizado/teste;
-4. testar proteção com janela curta antes de restaurar 24 h;
-5. ampliar somente após confirmar ausência de duplicidade, FloodWait anormal e confirmações falsas.
+1. deploy com três flags desligadas;
+2. ativar autosalvamento PV isoladamente;
+3. ativar ADD em grupo autorizado/teste;
+4. testar proteção curta, inclusive confirmando que menção solta não protege;
+5. restaurar 24 h somente após critérios GO.
