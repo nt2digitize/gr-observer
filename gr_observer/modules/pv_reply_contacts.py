@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 from ..contact_ledger import ContactLedger
+from ..pv_message_runtime import PvMessageRuntimeMixin
+from ..pv_message_steps import PvMessageStepStore
 from .pv_reply import PvReplyModule, display_name, is_human_sender
 
 
@@ -12,15 +14,17 @@ def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "sim"}
 
 
-class PvReplyWithContacts(PvReplyModule):
-    """Keep PV business flow intact while ensuring eligible inbound contacts."""
+class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
+    """Keep PV business flow intact while layering contacts and editable copy."""
 
     def __init__(self, storage, settings):
+        self.message_store = PvMessageStepStore(storage.pool, settings)
         super().__init__(storage, settings)
         self.contact_ledger = ContactLedger(storage.pool)
         self.auto_save_contacts = _enabled("PV_AUTO_SAVE_CONTACTS")
 
     async def on_connect(self, client, me) -> None:
+        await self.message_store.ensure_ready()
         await super().on_connect(client, me)
         await self.contact_ledger.on_connect(me)
 
@@ -61,4 +65,7 @@ class PvReplyWithContacts(PvReplyModule):
     def preview(self) -> str:
         base = super().preview()
         status = "ligado" if self.auto_save_contacts else "desligado"
-        return f"{base}\n\nContatos recebidos no PV: autosalvamento {status}."
+        return (
+            f"{base}\n\nContatos recebidos no PV: autosalvamento {status}."
+            "\n\nAs falas são editáveis no Radar por /mensagens_pv."
+        )
