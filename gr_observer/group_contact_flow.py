@@ -8,7 +8,7 @@ import os
 import re
 from typing import Any
 
-from telethon import functions, types, utils
+from telethon import functions, types
 
 from .catalog import normalize_text
 from .contact_ledger import ContactLedger
@@ -109,6 +109,21 @@ class GroupContactFlow:
         )
         return int(value) if value is not None else None
 
+    async def _is_repost_message(self, chat_id: int, message_id: int) -> bool:
+        current = await self._current_repost_message(chat_id)
+        if current == message_id:
+            return True
+        return bool(
+            await self.pool.fetchval(
+                """SELECT EXISTS(
+                     SELECT 1 FROM group_protected_messages
+                     WHERE chat_id=$1 AND message_id=$2
+                   )""",
+                chat_id,
+                message_id,
+            )
+        )
+
     async def _protect_message(
         self,
         *,
@@ -170,7 +185,12 @@ class GroupContactFlow:
             return
 
         if self.protection_enabled:
-            protect_id = replied_message_id if reply_to_ours else await self._current_repost_message(chat_id)
+            protect_id: int | None = None
+            if reply_to_ours and replied_message_id is not None:
+                if await self._is_repost_message(chat_id, replied_message_id):
+                    protect_id = replied_message_id
+            elif mentioned:
+                protect_id = await self._current_repost_message(chat_id)
             if protect_id is not None:
                 await self._protect_message(
                     chat_id=chat_id,
