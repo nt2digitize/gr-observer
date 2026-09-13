@@ -17,7 +17,16 @@ class GroupReplyWithContacts(GroupReplyModule):
 
     def register_actions(self, writer) -> None:
         super().register_actions(writer)
-        self.contact_flow.register_actions(writer, self.module_id)
+        writer.register(
+            self.module_id,
+            "group_add_contact_reply",
+            self.action_group_add_contact_reply,
+        )
+        writer.register(
+            self.module_id,
+            "cleanup_protected_group_message",
+            self.action_cleanup_protected_group_message,
+        )
 
     async def handle_event(self, event) -> bool:
         result = await super().handle_event(event)
@@ -33,6 +42,16 @@ class GroupReplyWithContacts(GroupReplyModule):
             return result
         await self.contact_flow.observe_event(event, sender, module_id=self.module_id)
         return result
+
+    async def action_group_add_contact_reply(self, action: dict, effects) -> dict:
+        if not self.contact_flow.add_enabled:
+            return {"sent": False, "reason": "feature_disabled"}
+        return await self.contact_flow.action_add_contact_reply(action, effects)
+
+    async def action_cleanup_protected_group_message(self, action: dict, effects) -> dict:
+        # Cleanup remains allowed after the feature is disabled so a temporary
+        # rollout cannot leave previously protected old posts behind forever.
+        return await self.contact_flow.action_cleanup_protected_message(action, effects)
 
     async def action_repost_group_text(self, action: dict, effects) -> dict:
         payload = action["payload"]
