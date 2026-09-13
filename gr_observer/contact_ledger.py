@@ -70,6 +70,23 @@ class ContactLedger:
     async def on_connect(self, me) -> None:
         self.account_user_id = int(me.id)
         await self.ensure_schema()
+        # If a module was administratively stopped after enqueue, the Writer
+        # can conclusively fail that Outbox action before this state is updated.
+        # Reset only save_queued rows that no longer have live work.
+        await self.pool.execute(
+            """UPDATE contact_account_state cas
+               SET status='observed',updated_at=NOW()
+               WHERE cas.account_user_id=$1
+                 AND cas.status='save_queued'
+                 AND NOT EXISTS(
+                   SELECT 1 FROM outbox_actions oa
+                   WHERE oa.action_type='ensure_contact_saved'
+                     AND oa.status IN ('pending','processing')
+                     AND (oa.payload->>'account_user_id')::BIGINT=cas.account_user_id
+                     AND (oa.payload->>'peer')::BIGINT=cas.user_id
+                 )""",
+            self.account_user_id,
+        )
 
     async def ensure_schema(self) -> None:
         # Compatibility guard. The schema remains additive and contains no
