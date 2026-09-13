@@ -54,6 +54,8 @@ class PvReplyWithContacts(PvReplyModule):
         return await super().handle_event(event)
 
     async def action_ensure_contact_saved(self, action: dict, effects) -> dict:
+        if not self.auto_save_contacts:
+            return {"saved": False, "reason": "feature_disabled"}
         return await self.contact_ledger.save_with_effects(action, effects)
 
     def preview(self) -> str:
