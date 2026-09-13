@@ -12,6 +12,8 @@ from typing import Any
 
 from telethon import functions, utils
 
+from .outbox import AmbiguousExternalEffect
+
 
 CONTACT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS contact_ledger (
@@ -216,6 +218,14 @@ class ContactLedger:
         if not account_id:
             raise RuntimeError("conta operadora indisponível para salvar contato")
 
+        await self.pool.execute(
+            """INSERT INTO contact_account_state(
+                   account_user_id,user_id,status,last_attempt_at,updated_at
+               ) VALUES($1,$2,'save_queued',NOW(),NOW())
+               ON CONFLICT(account_user_id,user_id) DO NOTHING""",
+            account_id,
+            user_id,
+        )
         state = await self.pool.fetchval(
             """SELECT status FROM contact_account_state
                WHERE account_user_id=$1 AND user_id=$2""",
@@ -259,11 +269,20 @@ class ContactLedger:
                 },
                 add_contact,
             )
+        except AmbiguousExternalEffect as exc:
+            await self.pool.execute(
+                """UPDATE contact_account_state SET
+                     status='review',last_attempt_at=NOW(),last_error=$3,updated_at=NOW()
+                   WHERE account_user_id=$1 AND user_id=$2""",
+                account_id,
+                user_id,
+                f"{type(exc).__name__}: {exc}"[:500],
+            )
+            raise
         except Exception as exc:
             await self.pool.execute(
                 """UPDATE contact_account_state SET
-                     status=CASE WHEN status='review' THEN status ELSE 'save_failed' END,
-                     last_attempt_at=NOW(),last_error=$3,updated_at=NOW()
+                     status='save_failed',last_attempt_at=NOW(),last_error=$3,updated_at=NOW()
                    WHERE account_user_id=$1 AND user_id=$2""",
                 account_id,
                 user_id,
