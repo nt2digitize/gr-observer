@@ -18,12 +18,13 @@ class CleanButtonMenuTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-    def test_compact_menu_is_composed_before_existing_panel_mixins(self):
+    def test_compact_menu_is_composed_before_canonical_editor_and_base_panel(self):
         self.assertIn("CleanMenuPanelMixin", self.integration)
         self.assertIn(
-            "CleanMenuPanelMixin,\n    PvMessageEditorPanelMixin,\n    BaseControlPanel",
+            "CleanMenuPanelMixin,\n    PvMessageEditorPanel,\n    BaseControlPanel",
             self.integration,
         )
+        self.assertNotIn("PvMessageEditorPanelMixin", self.integration)
 
     def test_home_exposes_six_operator_areas_and_status(self):
         for callback in (
