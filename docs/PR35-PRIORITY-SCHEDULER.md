@@ -91,3 +91,10 @@ A PR só pode ser promovida quando:
 5. nenhuma ação futura ultrapassar `available_at`;
 6. links contextuais provarem P0 apenas com proveniência humana recente;
 7. a #34, base arquitetural desta PR, estiver consolidada antes do deploy.
+
+## Registro de promoção
+
+A PR #34 foi consolidada em `release/pr16-production` pelo merge
+`b10859fa2273ddd0bc2b1dc41446416297dd13f9`. A PR #35 foi então retargetada
+para essa release. Este commit existe para forçar nova validação CI sobre a base
+definitiva antes do merge e do deploy em produção.
