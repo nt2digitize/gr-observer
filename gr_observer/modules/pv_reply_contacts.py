@@ -5,24 +5,304 @@ from __future__ import annotations
 import os
 
 from ..contact_ledger import ContactLedger
+from ..human_timing import (
+    MIN_WRITING_DELAY_SECONDS,
+    minimum_human_delay_seconds,
+    split_human_delay,
+)
+from ..pv_message_runtime import PvMessageRuntimeMixin, ZERO_POSITION
+from ..pv_message_steps import (
+    POSITION_GAP,
+    PvMessageStepStore,
+    has_link,
+    stable_delay_seconds,
+)
 from .pv_reply import PvReplyModule, display_name, is_human_sender
+
+DESTINATION_PAIR_MIGRATION_VERSION = 2
+HUMAN_TIMING_MIGRATION_VERSION = 3
 
 
 def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "sim"}
 
 
-class PvReplyWithContacts(PvReplyModule):
-    """Keep PV business flow intact while ensuring eligible inbound contacts."""
+class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
+    """Keep PV business flow intact while layering contacts and editable copy."""
 
     def __init__(self, storage, settings):
+        self.message_store = PvMessageStepStore(storage.pool, settings)
         super().__init__(storage, settings)
         self.contact_ledger = ContactLedger(storage.pool)
         self.auto_save_contacts = _enabled("PV_AUTO_SAVE_CONTACTS")
 
     async def on_connect(self, client, me) -> None:
+        await self.message_store.ensure_ready()
+        await self._ensure_destination_pair()
+        await self._ensure_human_timing_floor()
         await super().on_connect(client, me)
         await self.contact_ledger.on_connect(me)
+
+    async def _ensure_destination_pair(self) -> None:
+        """Add one editable message before the editable destination exactly once.
+
+        Internal live_* state names stay untouched for compatibility. Operator copy is
+        generic: the destination may be a live, VIP, video, group, channel, offer,
+        post or any other URL. Deleting either row remains permanent because this
+        migration is recorded once and is never re-seeded on restart.
+        """
+        async with self.storage.pool.acquire() as conn:
+            async with conn.transaction():
+                applied = await conn.fetchval(
+                    "SELECT 1 FROM pv_message_step_migrations WHERE version=$1",
+                    DESTINATION_PAIR_MIGRATION_VERSION,
+                )
+                if applied:
+                    return
+                await conn.execute(
+                    """UPDATE pv_message_steps
+                       SET position=$1, label='Destino', updated_at=NOW()
+                       WHERE step_key='live.link' AND block_key='live_link'""",
+                    POSITION_GAP * 2,
+                )
+                await conn.execute(
+                    """INSERT INTO pv_message_steps(
+                       step_key,block_key,branch_key,position,label,content,
+                       kind,median_delay_seconds,variant_root,built_in)
+                       VALUES(
+                         'destination.message','live_link',NULL,$1,
+                         'Mensagem do destino','Aqui está 👇','text',$2,FALSE,TRUE
+                       )
+                       ON CONFLICT(step_key) DO NOTHING""",
+                    POSITION_GAP,
+                    MIN_WRITING_DELAY_SECONDS,
+                )
+                await conn.execute(
+                    """INSERT INTO pv_message_step_migrations(version)
+                       VALUES($1) ON CONFLICT(version) DO NOTHING""",
+                    DESTINATION_PAIR_MIGRATION_VERSION,
+                )
+
+    async def _ensure_human_timing_floor(self) -> None:
+        """Remove legacy zero/near-zero message medians exactly once.
+
+        Runtime still applies a proportional floor based on the actual rendered text;
+        this migration guarantees the persisted operator value itself is never zero.
+        """
+        async with self.storage.pool.acquire() as conn:
+            async with conn.transaction():
+                applied = await conn.fetchval(
+                    "SELECT 1 FROM pv_message_step_migrations WHERE version=$1",
+                    HUMAN_TIMING_MIGRATION_VERSION,
+                )
+                if applied:
+                    return
+                await conn.execute(
+                    """UPDATE pv_message_steps
+                       SET median_delay_seconds=$1,updated_at=NOW()
+                       WHERE median_delay_seconds<$1""",
+                    MIN_WRITING_DELAY_SECONDS,
+                )
+                await conn.execute(
+                    """INSERT INTO pv_message_step_migrations(version)
+                       VALUES($1) ON CONFLICT(version) DO NOTHING""",
+                    HUMAN_TIMING_MIGRATION_VERSION,
+                )
+
+    def _human_plan(self, row, origin_key: str, rendered: str, extra_seconds: int = 0):
+        timing_key = f"{origin_key}:step:{row['id']}"
+        proportional_floor = minimum_human_delay_seconds(rendered, timing_key)
+        median = max(
+            proportional_floor,
+            int(row["median_delay_seconds"]) + int(extra_seconds),
+        )
+        total = max(
+            proportional_floor,
+            stable_delay_seconds(timing_key, median),
+        )
+        prewait, typing = split_human_delay(total, rendered, timing_key)
+        return timing_key, prewait, typing
+
+    async def _first_step_plan(
+        self,
+        block_key: str,
+        stable_key: str,
+        *,
+        extra_seconds: int = 0,
+    ):
+        """Use the exact same deterministic key later used by the actual send."""
+        await self.message_store.ensure_ready()
+        branch = await self.message_store.choose_branch(block_key, stable_key)
+        row = await self.message_store.first_step(block_key, branch)
+        if row is None:
+            return branch, None, 0.0, 0.0
+        rendered = self.message_store.render(
+            str(row["content"]), preview_link=self.settings.pv_preview_link
+        )
+        _, prewait, typing = self._human_plan(
+            row, stable_key, rendered, extra_seconds=extra_seconds
+        )
+        return branch, row, prewait, typing
+
+    async def _run_block(
+        self,
+        *,
+        action: dict,
+        effects,
+        block_key: str,
+        continuation: str,
+        context: dict | None = None,
+        variables: dict | None = None,
+        first_delay_applied: bool = True,
+    ) -> dict:
+        """Run a PV block while keeping every human wait durable and nonzero."""
+        await self.message_store.ensure_ready()
+        peer = int(action["payload"]["peer"])
+        origin_key = str(action["action_key"])
+        context = dict(context or {})
+        variables = dict(variables or {})
+        branch = await self.message_store.choose_branch(block_key, origin_key)
+        first = await self.message_store.first_step(block_key, branch)
+        if first is None:
+            return await self._complete_sequence(continuation, context, effects)
+        if not first_delay_applied:
+            rendered = self.message_store.render(
+                str(first["content"]),
+                preview_link=self.settings.pv_preview_link,
+                live_link=str(variables.get("live_link") or ""),
+            )
+            _, prewait, _ = self._human_plan(first, origin_key, rendered)
+            if prewait > 0:
+                await self._queue_sequence_continuation(
+                    peer=peer,
+                    origin_key=origin_key,
+                    block_key=block_key,
+                    branch_key=branch,
+                    after_position=ZERO_POSITION,
+                    continuation=continuation,
+                    context=context,
+                    variables=variables,
+                    prewait=prewait,
+                )
+                return {
+                    "sent": False,
+                    "queued": True,
+                    "reason": "first_step_delayed",
+                }
+        sent = await self._send_row(
+            effects=effects,
+            peer=peer,
+            row=first,
+            origin_key=origin_key,
+            variables=variables,
+        )
+        return await self._continue_after_row(
+            effects=effects,
+            peer=peer,
+            origin_key=origin_key,
+            block_key=block_key,
+            branch_key=branch,
+            row=first,
+            continuation=continuation,
+            context=context,
+            variables=variables,
+            sent=sent,
+        )
+
+    async def _continue_after_row(
+        self,
+        *,
+        effects,
+        peer: int,
+        origin_key: str,
+        block_key: str,
+        branch_key: str | None,
+        row,
+        continuation: str,
+        context: dict,
+        variables: dict,
+        sent: dict,
+    ) -> dict:
+        """Every later speech in the same block gets its own read + typing interval."""
+        current = row
+        results = [sent]
+        while True:
+            nxt = await self.message_store.next_step(
+                block_key, branch_key, current["position"]
+            )
+            if nxt is None:
+                completed = await self._complete_sequence(
+                    continuation, context, effects
+                )
+                return {
+                    "sent": any(item.get("sent") for item in results),
+                    "steps": results,
+                    **completed,
+                }
+            rendered = self.message_store.render(
+                str(nxt["content"]),
+                preview_link=self.settings.pv_preview_link,
+                live_link=str(variables.get("live_link") or ""),
+            )
+            _, prewait, _ = self._human_plan(nxt, origin_key, rendered)
+            if prewait > 0:
+                queued = await self._queue_sequence_continuation(
+                    peer=peer,
+                    origin_key=origin_key,
+                    block_key=block_key,
+                    branch_key=branch_key,
+                    after_position=current["position"],
+                    continuation=continuation,
+                    context=context,
+                    variables=variables,
+                    prewait=prewait,
+                )
+                return {
+                    "sent": any(item.get("sent") for item in results),
+                    "steps": results,
+                    "queued": queued,
+                }
+            item = await self._send_row(
+                effects=effects,
+                peer=peer,
+                row=nxt,
+                origin_key=origin_key,
+                variables=variables,
+            )
+            results.append(item)
+            current = nxt
+
+    async def _send_row(
+        self,
+        *,
+        effects,
+        peer: int,
+        row,
+        origin_key: str,
+        variables: dict,
+    ) -> dict:
+        """Every PV text gets proportional reading time plus visible typing."""
+        text = self.message_store.render(
+            str(row["content"]),
+            preview_link=self.settings.pv_preview_link,
+            live_link=str(variables.get("live_link") or ""),
+        ).strip()
+        if not text:
+            return {
+                "sent": False,
+                "reason": "empty_after_render",
+                "step_id": int(row["id"]),
+            }
+        _, _, typing = self._human_plan(row, origin_key, text)
+        await self._show_typing(effects, peer, typing)
+        effect_key = f"{origin_key}:message:{row['id']}"
+        sender = (
+            effects.send_text_preview
+            if has_link(text) or str(row["kind"]) == "link"
+            else effects.send_text
+        )
+        result = await sender(peer, text, effect_key)
+        return {"sent": True, "step_id": int(row["id"]), **result}
 
     def register_actions(self, writer) -> None:
         super().register_actions(writer)
@@ -53,6 +333,40 @@ class PvReplyWithContacts(PvReplyModule):
                     )
         return await super().handle_event(event)
 
+    async def action_send_live_link(self, action: dict, effects) -> dict:
+        """Deliver the editable message+destination pair.
+
+        Keeping ``{live_link}`` preserves the old campaign destination. Replacing it
+        with an explicit URL makes the destination independent from the old live
+        campaign link, without changing the existing state machine.
+        """
+        requires_campaign_link = bool(
+            await self.storage.pool.fetchval(
+                """SELECT EXISTS(
+                   SELECT 1 FROM pv_message_steps
+                   WHERE block_key='live_link'
+                     AND POSITION('{live_link}' IN content) > 0
+                   )"""
+            )
+        )
+        if requires_campaign_link:
+            return await super().action_send_live_link(action, effects)
+
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        if not await self.storage.live_recipient_allowed(
+            campaign_id, peer, "link_queued"
+        ):
+            return {"sent": False, "reason": "state_changed"}
+        return await self._run_block(
+            action=action,
+            effects=effects,
+            block_key="live_link",
+            continuation="live_link",
+            context={"peer": peer, "campaign_id": campaign_id},
+            variables={},
+        )
+
     async def action_ensure_contact_saved(self, action: dict, effects) -> dict:
         if not self.auto_save_contacts:
             return {"saved": False, "reason": "feature_disabled"}
@@ -61,4 +375,9 @@ class PvReplyWithContacts(PvReplyModule):
     def preview(self) -> str:
         base = super().preview()
         status = "ligado" if self.auto_save_contacts else "desligado"
-        return f"{base}\n\nContatos recebidos no PV: autosalvamento {status}."
+        return (
+            f"{base}\n\nContatos recebidos no PV: autosalvamento {status}."
+            "\n\nAs falas são editáveis no Radar por /mensagens_pv."
+            "\nMensagem + destino também são editáveis separadamente."
+            "\nToda fala automática usa leitura + digitação proporcional; tempo zero é bloqueado."
+        )
