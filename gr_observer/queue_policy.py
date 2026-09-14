@@ -18,15 +18,25 @@ P4_BACKGROUND = 4
 
 AGING_STEP_SECONDS = 180
 LANE_REPEAT_PENALTY = 1
+FRESH_HUMAN_TTL_SECONDS = 300
+HUMAN_INBOUND_ORIGIN = "human_inbound"
+
+# These actions are urgent only when they were created directly from a recent
+# inbound human turn. The same action type created by automation stays normal.
+CONDITIONAL_P0_ACTIONS = {
+    ("pv_reply", "send_reminder_link"),
+    ("pv_reply", "send_live_link"),
+}
 
 ACTION_PRIORITY: dict[tuple[str, str], int] = {
-    # A human is actively waiting in PV.
+    # A human is actively waiting in PV by definition of the action.
     ("pv_reply", "send_greeting"): P0_LIVE_HUMAN,
     ("pv_reply", "send_link"): P0_LIVE_HUMAN,
-    ("pv_reply", "send_reminder_link"): P0_LIVE_HUMAN,
-    ("pv_reply", "send_live_link"): P0_LIVE_HUMAN,
     ("pv_reply", "send_two_screens_question"): P0_LIVE_HUMAN,
     ("pv_reply", "send_two_screens_retry"): P0_LIVE_HUMAN,
+    # Conditional P0 actions fall back here when not fresh-human originated.
+    ("pv_reply", "send_reminder_link"): P2_NORMAL,
+    ("pv_reply", "send_live_link"): P2_NORMAL,
     # A human is actively waiting in a group, or a PV flow is continuing live.
     ("group_reply", "send_group_reply"): P1_HUMAN_REACTIVE,
     ("group_reply", "group_add_contact_reply"): P1_HUMAN_REACTIVE,
@@ -52,8 +62,21 @@ ACTION_PRIORITY: dict[tuple[str, str], int] = {
 DEFAULT_PRIORITY = P2_NORMAL
 
 
-def base_priority(module_id: str, action_type: str) -> int:
-    return ACTION_PRIORITY.get((str(module_id), str(action_type)), DEFAULT_PRIORITY)
+def base_priority(
+    module_id: str,
+    action_type: str,
+    *,
+    priority_origin: str | None = None,
+    origin_age_seconds: float = 0.0,
+) -> int:
+    key = (str(module_id), str(action_type))
+    if (
+        key in CONDITIONAL_P0_ACTIONS
+        and priority_origin == HUMAN_INBOUND_ORIGIN
+        and 0.0 <= float(origin_age_seconds) <= FRESH_HUMAN_TTL_SECONDS
+    ):
+        return P0_LIVE_HUMAN
+    return ACTION_PRIORITY.get(key, DEFAULT_PRIORITY)
 
 
 def lane_key(module_id: str, payload: dict[str, Any] | None) -> str:
@@ -73,9 +96,16 @@ def effective_priority(
     wait_seconds: float,
     lane: str,
     last_lane: str | None,
+    priority_origin: str | None = None,
+    origin_age_seconds: float = 0.0,
 ) -> int:
     """Age ready work upward and discourage one lane from monopolizing turns."""
-    base = base_priority(module_id, action_type)
+    base = base_priority(
+        module_id,
+        action_type,
+        priority_origin=priority_origin,
+        origin_age_seconds=origin_age_seconds,
+    )
     age_steps = max(0, int(wait_seconds // AGING_STEP_SECONDS))
     aged = max(P0_LIVE_HUMAN, base - min(base, age_steps))
     repeat_penalty = LANE_REPEAT_PENALTY if last_lane and lane == last_lane else 0
@@ -86,7 +116,19 @@ def priority_case_sql(alias: str = "actions") -> str:
     grouped: dict[int, list[tuple[str, str]]] = {}
     for key, priority in ACTION_PRIORITY.items():
         grouped.setdefault(priority, []).append(key)
+    conditional = " OR ".join(
+        f"({alias}.module_id='{module}' AND {alias}.action_type='{action}')"
+        for module, action in sorted(CONDITIONAL_P0_ACTIONS)
+    )
     branches: list[str] = ["CASE"]
+    branches.append(
+        "WHEN ("
+        + conditional
+        + ") "
+        + f"AND COALESCE({alias}.payload->>'priority_origin','')='{HUMAN_INBOUND_ORIGIN}' "
+        + f"AND {alias}.created_at >= NOW()-INTERVAL '{FRESH_HUMAN_TTL_SECONDS} seconds' "
+        + f"THEN {P0_LIVE_HUMAN}"
+    )
     for priority in sorted(grouped):
         conditions = [
             f"({alias}.module_id='{module}' AND {alias}.action_type='{action}')"
@@ -115,6 +157,8 @@ class SimAction:
     action_type: str
     available_at: float
     peer: int | str | None = None
+    priority_origin: str | None = None
+    created_at: float | None = None
 
     @property
     def lane(self) -> str:
@@ -128,17 +172,21 @@ def choose_ready_action(
     ready = [action for action in actions if action.available_at <= now]
     if not ready:
         return None
-    return min(
-        ready,
-        key=lambda action: (
+
+    def sort_key(action: SimAction):
+        created_at = action.available_at if action.created_at is None else action.created_at
+        return (
             effective_priority(
                 action.module_id,
                 action.action_type,
                 wait_seconds=max(0.0, now - action.available_at),
                 lane=action.lane,
                 last_lane=last_lane,
+                priority_origin=action.priority_origin,
+                origin_age_seconds=max(0.0, now - created_at),
             ),
             action.available_at,
             action.key,
-        ),
-    )
+        )
+
+    return min(ready, key=sort_key)
