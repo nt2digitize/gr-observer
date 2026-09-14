@@ -106,8 +106,12 @@ class IntegrationContractTests(unittest.TestCase):
         source = (ROOT / "gr_observer" / "modules" / "pv_reply_contacts.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('timing_key = f"{stable_key}:step:{row[\'id\']}"', source)
+        # Both scheduling and sending route through the same helper. The helper
+        # derives exactly one deterministic :step:<id> key from its caller key.
+        self.assertIn("def _human_plan", source)
         self.assertIn('timing_key = f"{origin_key}:step:{row[\'id\']}"', source)
+        self.assertIn("self._human_plan(\n            row, stable_key, rendered", source)
+        self.assertIn("self._human_plan(row, origin_key, text)", source)
         self.assertNotIn(":first:", source)
 
     def test_editor_rejects_zero(self):
