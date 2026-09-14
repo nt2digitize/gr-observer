@@ -12,7 +12,7 @@ from telethon.sessions import MemorySession, StringSession
 from .config import Settings
 from .group_integration import GroupControlPanel, register_group_reply
 from .modules.botson import BotsonModule
-from .modules.pv_reply import PvReplyModule
+from .modules.pv_reply_contacts import PvReplyWithContacts
 from .modules.radar import RadarModule
 from .outbox import OutboxWriter
 from .registry import ModuleRegistry
@@ -63,7 +63,7 @@ class Observer:
             RadarModule(self.pool, self.settings, self.pause_module),
         )
         self.registry.register(
-            "pv_reply", PvReplyModule(self.storage, self.settings)
+            "pv_reply", PvReplyWithContacts(self.storage, self.settings)
         )
         register_group_reply(self)
         self.registry.register("botson", BotsonModule(self.storage, self.settings))
