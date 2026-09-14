@@ -6,8 +6,10 @@ import os
 
 from ..contact_ledger import ContactLedger
 from ..pv_message_runtime import PvMessageRuntimeMixin
-from ..pv_message_steps import PvMessageStepStore
+from ..pv_message_steps import POSITION_GAP, PvMessageStepStore
 from .pv_reply import PvReplyModule, display_name, is_human_sender
+
+DESTINATION_PAIR_MIGRATION_VERSION = 2
 
 
 def _enabled(name: str) -> bool:
@@ -25,8 +27,49 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
 
     async def on_connect(self, client, me) -> None:
         await self.message_store.ensure_ready()
+        await self._ensure_destination_pair()
         await super().on_connect(client, me)
         await self.contact_ledger.on_connect(me)
+
+    async def _ensure_destination_pair(self) -> None:
+        """Add one editable message before the editable destination exactly once.
+
+        Internal live_* state names stay untouched for compatibility. Operator copy is
+        generic: the destination may be a live, VIP, video, group, channel, offer,
+        post or any other URL. Deleting either row remains permanent because this
+        migration is recorded once and is never re-seeded on restart.
+        """
+        async with self.storage.pool.acquire() as conn:
+            async with conn.transaction():
+                applied = await conn.fetchval(
+                    "SELECT 1 FROM pv_message_step_migrations WHERE version=$1",
+                    DESTINATION_PAIR_MIGRATION_VERSION,
+                )
+                if applied:
+                    return
+                await conn.execute(
+                    """UPDATE pv_message_steps
+                       SET position=$2, label='Destino', updated_at=NOW()
+                       WHERE step_key='live.link' AND block_key='live_link'""",
+                    POSITION_GAP,
+                    POSITION_GAP * 2,
+                )
+                await conn.execute(
+                    """INSERT INTO pv_message_steps(
+                       step_key,block_key,branch_key,position,label,content,
+                       kind,median_delay_seconds,variant_root,built_in)
+                       VALUES(
+                         'destination.message','live_link',NULL,$1,
+                         'Mensagem do destino','Aqui está 👇','text',0,FALSE,TRUE
+                       )
+                       ON CONFLICT(step_key) DO NOTHING""",
+                    POSITION_GAP,
+                )
+                await conn.execute(
+                    """INSERT INTO pv_message_step_migrations(version)
+                       VALUES($1) ON CONFLICT(version) DO NOTHING""",
+                    DESTINATION_PAIR_MIGRATION_VERSION,
+                )
 
     def register_actions(self, writer) -> None:
         super().register_actions(writer)
@@ -57,6 +100,40 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
                     )
         return await super().handle_event(event)
 
+    async def action_send_live_link(self, action: dict, effects) -> dict:
+        """Deliver the editable message+destination pair.
+
+        Keeping ``{live_link}`` preserves the old campaign destination. Replacing it
+        with an explicit URL makes the destination independent from the old live
+        campaign link, without changing the existing state machine.
+        """
+        requires_campaign_link = bool(
+            await self.storage.pool.fetchval(
+                """SELECT EXISTS(
+                   SELECT 1 FROM pv_message_steps
+                   WHERE block_key='live_link'
+                     AND POSITION('{live_link}' IN content) > 0
+                   )"""
+            )
+        )
+        if requires_campaign_link:
+            return await super().action_send_live_link(action, effects)
+
+        peer = int(action["payload"]["peer"])
+        campaign_id = int(action["payload"]["campaign_id"])
+        if not await self.storage.live_recipient_allowed(
+            campaign_id, peer, "link_queued"
+        ):
+            return {"sent": False, "reason": "state_changed"}
+        return await self._run_block(
+            action=action,
+            effects=effects,
+            block_key="live_link",
+            continuation="live_link",
+            context={"peer": peer, "campaign_id": campaign_id},
+            variables={},
+        )
+
     async def action_ensure_contact_saved(self, action: dict, effects) -> dict:
         if not self.auto_save_contacts:
             return {"saved": False, "reason": "feature_disabled"}
@@ -68,4 +145,5 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
         return (
             f"{base}\n\nContatos recebidos no PV: autosalvamento {status}."
             "\n\nAs falas são editáveis no Radar por /mensagens_pv."
+            "\nMensagem + destino também são editáveis separadamente."
         )
