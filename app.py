@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from gr_observer.application import Observer
 from gr_observer.config import missing_panel_env
+from gr_observer.durable_peers import DurablePeerObserverMixin
 from gr_observer.flood_monitor import FloodAwareObserverMixin
 
 load_dotenv()
@@ -18,8 +19,8 @@ logging.basicConfig(
 log = logging.getLogger("gr-observer")
 
 
-class RuntimeObserver(FloodAwareObserverMixin, Observer):
-    """Production composition root with FloodWait telemetry."""
+class RuntimeObserver(FloodAwareObserverMixin, DurablePeerObserverMixin, Observer):
+    """Production composition root with FloodWait telemetry and durable peers."""
 
 
 if __name__ == "__main__":
