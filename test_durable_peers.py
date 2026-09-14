@@ -81,9 +81,9 @@ class DurablePeerTests(unittest.IsolatedAsyncioTestCase):
         module_source = inspect.getsource(DurableTelegramClient)
         self.assertNotIn("client.get_input_entity =", module_source)
 
-    def test_missing_peer_control_flow_bypasses_exception_handlers(self):
+    def test_missing_peer_is_regular_exception_for_explicit_boundary_handling(self):
+        self.assertTrue(issubclass(PeerReferenceUnavailable, Exception))
         self.assertTrue(issubclass(PeerReferenceUnavailable, BaseException))
-        self.assertFalse(issubclass(PeerReferenceUnavailable, Exception))
 
 
 if __name__ == "__main__":
