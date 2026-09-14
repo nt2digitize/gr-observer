@@ -25,6 +25,13 @@ class PvEditorSafetyMixin:
             or re.fullmatch(r"pvm:q:\d+:\d+", data)
         )
 
+    def _resolved_destination(self, content: str) -> str | None:
+        """Return the destination the runtime would substitute for a placeholder."""
+        value = content or ""
+        if "{preview_link}" in value:
+            return str(getattr(self.app.settings, "pv_preview_link", "") or "").strip() or None
+        return None
+
     async def on_callback(self, event) -> None:
         if self.app.is_admin(event) and self.pv_editor_pending:
             data = event.data.decode("utf-8", errors="replace")
@@ -89,11 +96,18 @@ class PvEditorSafetyMixin:
         }
         await event.answer()
         current = str(row["content"] or "")
+        resolved = self._resolved_destination(current)
+        destination = (
+            f"\n\nDestino que será enviado agora:\n{resolved}"
+            if resolved
+            else ""
+        )
         await self._render_editor(
             event,
             "✏️ EDITAR FALA\n\n"
-            "Texto atual (copie, edite e envie):\n\n"
-            f"{current}\n\n"
+            "Texto salvo (copie, edite e envie):\n\n"
+            f"{current}"
+            f"{destination}\n\n"
             "Nada muda enquanto você não enviar um novo texto. "
             "Sair ou tocar em Manter atual preserva a produção.",
             [[Button.inline("✅ Manter atual", b"pvm:cancel")]],
