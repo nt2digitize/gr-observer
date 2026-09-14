@@ -10,6 +10,7 @@ from gr_observer.application import Observer
 from gr_observer.config import missing_panel_env
 from gr_observer.durable_peers import DurablePeerObserverMixin
 from gr_observer.flood_monitor import FloodAwareObserverMixin
+from gr_observer.pv_production_guard import PvProductionGuardMixin
 # Keep the v1 symbol visible for architecture-regression compatibility; V2
 # subclasses it and is the production runtime actually composed below.
 from gr_observer.runtime_safety import ProductionSafetyMixin  # noqa: F401
@@ -25,6 +26,7 @@ log = logging.getLogger("gr-observer")
 
 class RuntimeObserver(
     FloodAwareObserverMixin,
+    PvProductionGuardMixin,
     ProductionSafetyV2Mixin,
     DurablePeerObserverMixin,
     Observer,
