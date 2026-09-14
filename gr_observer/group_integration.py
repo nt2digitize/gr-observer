@@ -12,6 +12,7 @@ from .catalog import match_command
 from .clean_menu_panel import CleanMenuPanelMixin
 from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
+from .pv_editor_safety import PvEditorSafetyMixin
 from .pv_message_panel import PvMessageEditorPanelMixin
 
 
@@ -25,6 +26,7 @@ def register_group_reply(application) -> None:
 
 class GroupControlPanel(
     CleanMenuPanelMixin,
+    PvEditorSafetyMixin,
     PvMessageEditorPanelMixin,
     BaseControlPanel,
 ):
