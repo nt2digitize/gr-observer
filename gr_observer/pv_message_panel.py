@@ -8,6 +8,7 @@ import re
 from telethon import Button, events
 
 from .catalog import match_command
+from .human_timing import MIN_WRITING_DELAY_SECONDS, minimum_human_delay_seconds
 from .pv_message_steps import BLOCK_LABELS, MAX_MEDIAN_SECONDS
 
 PAGE_SIZE = 5
@@ -85,10 +86,18 @@ class PvMessageEditorPanelMixin:
                 await self.show_pv_message_editor(event, 0)
                 return
             if action == "time":
-                self.pv_editor_pending = {"mode": "time", "step_id": step_id}
+                content = str(row["content"] or "")
+                minimum = minimum_human_delay_seconds(content, f"editor:{step_id}")
+                self.pv_editor_pending = {
+                    "mode": "time",
+                    "step_id": step_id,
+                    "minimum": minimum,
+                }
                 await event.answer()
                 await event.respond(
-                    "Digite a mediana em segundos desde a fala anterior.\nExemplo: 120",
+                    "Digite a mediana em segundos desde a fala anterior.\n"
+                    f"Mínimo humano calculado para esta fala: {minimum} s.\n"
+                    "Zero não é permitido.",
                     buttons=[[Button.inline("❌ Cancelar", b"pvm:cancel")]],
                     parse_mode=None,
                     link_preview=False,
@@ -129,6 +138,13 @@ class PvMessageEditorPanelMixin:
                 await event.respond("Digite somente o número de segundos.", parse_mode=None)
                 return
             seconds = int(value)
+            minimum = max(MIN_WRITING_DELAY_SECONDS, int(pending.get("minimum", 0)))
+            if seconds < minimum:
+                await event.respond(
+                    f"Tempo muito curto. Para esta fala use no mínimo {minimum} s; zero nunca é permitido.",
+                    parse_mode=None,
+                )
+                return
             if seconds > MAX_MEDIAN_SECONDS:
                 await event.respond("Tempo muito alto. Use até 31536000 segundos.", parse_mode=None)
                 return
@@ -145,13 +161,17 @@ class PvMessageEditorPanelMixin:
             if not value:
                 await event.respond("A nova fala precisa ter conteúdo.", parse_mode=None)
                 return
+            minimum = minimum_human_delay_seconds(value, f"editor:new:{step_id}")
             self.pv_editor_pending = {
                 "mode": "add_time",
                 "step_id": step_id,
                 "content": value,
+                "minimum": minimum,
             }
             await event.respond(
-                "Agora digite a mediana em segundos desde a fala anterior.\nExemplo: 120",
+                "Agora digite a mediana em segundos desde a fala anterior.\n"
+                f"Mínimo humano para este texto: {minimum} s.\n"
+                "Zero não é permitido.",
                 buttons=[[Button.inline("❌ Cancelar", b"pvm:cancel")]],
                 parse_mode=None,
                 link_preview=False,
@@ -163,6 +183,13 @@ class PvMessageEditorPanelMixin:
                 await event.respond("Digite somente o número de segundos.", parse_mode=None)
                 return
             seconds = int(value)
+            minimum = max(MIN_WRITING_DELAY_SECONDS, int(pending.get("minimum", 0)))
+            if seconds < minimum:
+                await event.respond(
+                    f"Tempo muito curto. Para esta fala use no mínimo {minimum} s; zero nunca é permitido.",
+                    parse_mode=None,
+                )
+                return
             if seconds > MAX_MEDIAN_SECONDS:
                 await event.respond("Tempo muito alto. Use até 31536000 segundos.", parse_mode=None)
                 return
@@ -197,6 +224,7 @@ class PvMessageEditorPanelMixin:
             "💬 ATENDIMENTO PV — FALAS",
             "",
             "Tempo = mediana em segundos desde a fala anterior.",
+            "Leitura + digitação são proporcionais ao texto; tempo zero é proibido.",
             "A variação humana é automática; atrasos já materializados não são recalculados.",
             "",
         ]
