@@ -1,19 +1,26 @@
 import inspect
+from pathlib import Path
 import unittest
 
 from gr_observer.priority_storage import PriorityStorage, SCHEDULER_SCHEMA
 from gr_observer.queue_policy import (
     AGING_STEP_SECONDS,
+    FRESH_HUMAN_TTL_SECONDS,
     P0_LIVE_HUMAN,
     P1_HUMAN_REACTIVE,
+    P2_NORMAL,
     P3_DEFERRED,
     P4_BACKGROUND,
     SimAction,
     base_priority,
     choose_ready_action,
     effective_priority,
+    priority_case_sql,
 )
 from scripts.bench_priority_scheduler import matrix, run_bench
+
+
+ROOT = Path(__file__).resolve().parent
 
 
 class PriorityPolicyTests(unittest.TestCase):
@@ -27,6 +34,61 @@ class PriorityPolicyTests(unittest.TestCase):
         self.assertEqual(
             base_priority("group_reply", "repost_group_text"), P4_BACKGROUND
         )
+
+    def test_contextual_links_are_p0_only_for_recent_human_origin(self):
+        self.assertEqual(
+            base_priority(
+                "pv_reply",
+                "send_live_link",
+                action_key="pv_reply:live-link:44:99",
+                origin_age_seconds=30,
+            ),
+            P0_LIVE_HUMAN,
+        )
+        self.assertEqual(
+            base_priority(
+                "pv_reply",
+                "send_reminder_link",
+                action_key="pv_reply:conditional-link:99:weekly:4",
+                origin_age_seconds=30,
+            ),
+            P0_LIVE_HUMAN,
+        )
+        self.assertEqual(
+            base_priority(
+                "pv_reply",
+                "send_live_link",
+                action_key="pv_reply:automated-live-link:44:99",
+                origin_age_seconds=30,
+            ),
+            P2_NORMAL,
+        )
+        self.assertEqual(
+            base_priority(
+                "pv_reply",
+                "send_reminder_link",
+                action_key="pv_reply:conditional-link:99:weekly:4",
+                origin_age_seconds=FRESH_HUMAN_TTL_SECONDS + 1,
+            ),
+            P2_NORMAL,
+        )
+
+    def test_contextual_p0_provenance_is_structurally_bound_to_inbound_pv(self):
+        storage = (ROOT / "gr_observer" / "storage.py").read_text(encoding="utf-8")
+        self.assertEqual(storage.count("pv_reply:live-link:"), 1)
+        self.assertEqual(storage.count("pv_reply:conditional-link:"), 1)
+        from gr_observer.storage import Storage
+
+        inbound = inspect.getsource(Storage.accept_pv_message)
+        self.assertIn("pv_reply:live-link:", inbound)
+        self.assertIn("pv_reply:conditional-link:", inbound)
+
+    def test_sql_uses_same_provenance_and_recency_rule(self):
+        sql = priority_case_sql("actions")
+        self.assertIn("actions.action_key LIKE 'pv_reply:live-link:%'", sql)
+        self.assertIn("actions.action_key LIKE 'pv_reply:conditional-link:%'", sql)
+        self.assertIn(f"INTERVAL '{FRESH_HUMAN_TTL_SECONDS} seconds'", sql)
+        self.assertIn("actions.created_at", sql)
 
     def test_future_action_never_jumps_the_availability_gate(self):
         future = SimAction("future", "pv_reply", "send_greeting", 61, 1)
@@ -55,6 +117,27 @@ class PriorityPolicyTests(unittest.TestCase):
         fresh = SimAction("fresh", "pv_reply", "send_greeting", wait, 999)
         self.assertEqual(
             choose_ready_action([old, fresh], now=wait, last_lane=None), old
+        )
+
+    def test_recent_human_link_beats_automated_same_type(self):
+        human = SimAction(
+            "pv_reply:live-link:1:100",
+            "pv_reply",
+            "send_live_link",
+            100,
+            100,
+            created_at=90,
+        )
+        automated = SimAction(
+            "pv_reply:automated-live-link:2:200",
+            "pv_reply",
+            "send_live_link",
+            80,
+            200,
+            created_at=80,
+        )
+        self.assertEqual(
+            choose_ready_action([automated, human], now=100, last_lane=None), human
         )
 
 
