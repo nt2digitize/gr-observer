@@ -10,7 +10,7 @@ from ..human_timing import (
     minimum_human_delay_seconds,
     split_human_delay,
 )
-from ..pv_message_runtime import PvMessageRuntimeMixin
+from ..pv_message_runtime import PvMessageRuntimeMixin, ZERO_POSITION
 from ..pv_message_steps import (
     POSITION_GAP,
     PvMessageStepStore,
@@ -109,6 +109,20 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
                     HUMAN_TIMING_MIGRATION_VERSION,
                 )
 
+    def _human_plan(self, row, origin_key: str, rendered: str, extra_seconds: int = 0):
+        timing_key = f"{origin_key}:step:{row['id']}"
+        proportional_floor = minimum_human_delay_seconds(rendered, timing_key)
+        median = max(
+            proportional_floor,
+            int(row["median_delay_seconds"]) + int(extra_seconds),
+        )
+        total = max(
+            proportional_floor,
+            stable_delay_seconds(timing_key, median),
+        )
+        prewait, typing = split_human_delay(total, rendered, timing_key)
+        return timing_key, prewait, typing
+
     async def _first_step_plan(
         self,
         block_key: str,
@@ -125,18 +139,138 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
         rendered = self.message_store.render(
             str(row["content"]), preview_link=self.settings.pv_preview_link
         )
-        timing_key = f"{stable_key}:step:{row['id']}"
-        proportional_floor = minimum_human_delay_seconds(rendered, timing_key)
-        median = max(
-            proportional_floor,
-            int(row["median_delay_seconds"]) + int(extra_seconds),
+        _, prewait, typing = self._human_plan(
+            row, stable_key, rendered, extra_seconds=extra_seconds
         )
-        total = max(
-            proportional_floor,
-            stable_delay_seconds(timing_key, median),
-        )
-        prewait, typing = split_human_delay(total, rendered, timing_key)
         return branch, row, prewait, typing
+
+    async def _run_block(
+        self,
+        *,
+        action: dict,
+        effects,
+        block_key: str,
+        continuation: str,
+        context: dict | None = None,
+        variables: dict | None = None,
+        first_delay_applied: bool = True,
+    ) -> dict:
+        """Run a PV block while keeping every human wait durable and nonzero."""
+        await self.message_store.ensure_ready()
+        peer = int(action["payload"]["peer"])
+        origin_key = str(action["action_key"])
+        context = dict(context or {})
+        variables = dict(variables or {})
+        branch = await self.message_store.choose_branch(block_key, origin_key)
+        first = await self.message_store.first_step(block_key, branch)
+        if first is None:
+            return await self._complete_sequence(continuation, context, effects)
+        if not first_delay_applied:
+            rendered = self.message_store.render(
+                str(first["content"]),
+                preview_link=self.settings.pv_preview_link,
+                live_link=str(variables.get("live_link") or ""),
+            )
+            _, prewait, _ = self._human_plan(first, origin_key, rendered)
+            if prewait > 0:
+                await self._queue_sequence_continuation(
+                    peer=peer,
+                    origin_key=origin_key,
+                    block_key=block_key,
+                    branch_key=branch,
+                    after_position=ZERO_POSITION,
+                    continuation=continuation,
+                    context=context,
+                    variables=variables,
+                    prewait=prewait,
+                )
+                return {
+                    "sent": False,
+                    "queued": True,
+                    "reason": "first_step_delayed",
+                }
+        sent = await self._send_row(
+            effects=effects,
+            peer=peer,
+            row=first,
+            origin_key=origin_key,
+            variables=variables,
+        )
+        return await self._continue_after_row(
+            effects=effects,
+            peer=peer,
+            origin_key=origin_key,
+            block_key=block_key,
+            branch_key=branch,
+            row=first,
+            continuation=continuation,
+            context=context,
+            variables=variables,
+            sent=sent,
+        )
+
+    async def _continue_after_row(
+        self,
+        *,
+        effects,
+        peer: int,
+        origin_key: str,
+        block_key: str,
+        branch_key: str | None,
+        row,
+        continuation: str,
+        context: dict,
+        variables: dict,
+        sent: dict,
+    ) -> dict:
+        """Every later speech in the same block gets its own read + typing interval."""
+        current = row
+        results = [sent]
+        while True:
+            nxt = await self.message_store.next_step(
+                block_key, branch_key, current["position"]
+            )
+            if nxt is None:
+                completed = await self._complete_sequence(
+                    continuation, context, effects
+                )
+                return {
+                    "sent": any(item.get("sent") for item in results),
+                    "steps": results,
+                    **completed,
+                }
+            rendered = self.message_store.render(
+                str(nxt["content"]),
+                preview_link=self.settings.pv_preview_link,
+                live_link=str(variables.get("live_link") or ""),
+            )
+            _, prewait, _ = self._human_plan(nxt, origin_key, rendered)
+            if prewait > 0:
+                queued = await self._queue_sequence_continuation(
+                    peer=peer,
+                    origin_key=origin_key,
+                    block_key=block_key,
+                    branch_key=branch_key,
+                    after_position=current["position"],
+                    continuation=continuation,
+                    context=context,
+                    variables=variables,
+                    prewait=prewait,
+                )
+                return {
+                    "sent": any(item.get("sent") for item in results),
+                    "steps": results,
+                    "queued": queued,
+                }
+            item = await self._send_row(
+                effects=effects,
+                peer=peer,
+                row=nxt,
+                origin_key=origin_key,
+                variables=variables,
+            )
+            results.append(item)
+            current = nxt
 
     async def _send_row(
         self,
@@ -159,11 +293,7 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
                 "reason": "empty_after_render",
                 "step_id": int(row["id"]),
             }
-        timing_key = f"{origin_key}:step:{row['id']}"
-        proportional_floor = minimum_human_delay_seconds(text, timing_key)
-        median = max(proportional_floor, int(row["median_delay_seconds"]))
-        total = max(proportional_floor, stable_delay_seconds(timing_key, median))
-        _, typing = split_human_delay(total, text, timing_key)
+        _, _, typing = self._human_plan(row, origin_key, text)
         await self._show_typing(effects, peer, typing)
         effect_key = f"{origin_key}:message:{row['id']}"
         sender = (
