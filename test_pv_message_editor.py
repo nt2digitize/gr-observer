@@ -74,7 +74,6 @@ class MessageCatalogMigrationTests(unittest.TestCase):
             "pv.two_screens.retry",
         ):
             self.assertIn(CAMPAIGNS[key]["text"], contents)
-        # The active two-screens path and retry both use this same approved copy.
         self.assertGreaterEqual(
             contents.count(DIALOGS["pv.two_screens.preference"]), 3
         )
@@ -274,14 +273,19 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("SetTypingRequest", source)
         self.assertIn("before_user_write", source)
 
-    def test_panel_has_three_direct_commands(self):
+    def test_panel_selects_one_speech_then_shows_shared_controls(self):
         source = (ROOT / "gr_observer" / "pv_message_panel.py").read_text(
             encoding="utf-8"
         )
+        self.assertIn("FALA SELECIONADA", source)
         self.assertIn('Button.inline("✏️ Texto"', source)
         self.assertIn('Button.inline("⏱ Tempo"', source)
-        self.assertIn('Button.inline("➕ Depois"', source)
-        self.assertIn("Salvar vazio / apagar", source)
+        self.assertIn('Button.inline("🎯 Intenção"', source)
+        self.assertIn('Button.inline("⚙️ Sequência"', source)
+        self.assertIn("SUBSTITUI esta fala; não cria outra", source)
+        self.assertIn("pv_message_step_ui_meta", source)
+        self.assertIn("self.client.edit_message", source)
+        self.assertNotIn("Salvar vazio / apagar", source)
 
     def test_delete_is_physical_and_seed_is_versioned_once(self):
         source = (ROOT / "gr_observer" / "pv_message_steps.py").read_text(
