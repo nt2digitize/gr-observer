@@ -20,7 +20,7 @@ envio Telegram e sem criar outra sessão, Outbox ou Writer.
 
 | Classe | Uso |
 |---|---|
-| P0 | humano aguardando resposta no PV |
+| P0 | humano aguardando resposta no PV agora |
 | P1 | resposta/ADD humano em grupo e continuação PV ativa |
 | P2 | automação conversacional normal |
 | P3 | follow-up, semanal e campanha diferida |
@@ -28,6 +28,18 @@ envio Telegram e sem criar outra sessão, Outbox ou Writer.
 
 A classificação é por `module_id + action_type`; não existe regra simplista de
 "PV sempre ganha de Grupo".
+
+### P0 contextual
+
+`send_live_link` e `send_reminder_link` não são P0 apenas pelo nome da ação.
+Elas viram P0 somente quando a própria chave determinística do Outbox comprova
+que nasceram do ramo de mensagem humana (`pv_reply:live-link:` ou
+`pv_reply:conditional-link:`) e a ação tem no máximo 300 segundos desde a
+criação. Depois dessa janela, voltam a P2 e continuam sujeitas ao aging normal.
+
+Esses dois prefixos são criados apenas dentro de `Storage.accept_pv_message`.
+Um teste estrutural conta as ocorrências no arquivo e falha se essa proveniência
+for reutilizada fora do processamento de inbound PV.
 
 ## Fairness
 
@@ -77,4 +89,5 @@ A PR só pode ser promovida quando:
 3. P0 pronto tiver overhead de fila de no máximo um turno no burst de bancada;
 4. P4 provar envelhecimento até conseguir turno;
 5. nenhuma ação futura ultrapassar `available_at`;
-6. a #34, base arquitetural desta PR, estiver consolidada antes do deploy.
+6. links contextuais provarem P0 apenas com proveniência humana recente;
+7. a #34, base arquitetural desta PR, estiver consolidada antes do deploy.
