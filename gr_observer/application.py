@@ -291,6 +291,16 @@ class Observer:
                         item.module_id,
                         f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar",
                     )
+                except errors.ChannelPrivateError:
+                    # A stale/private/left channel is a definitive read failure
+                    # for this event only. It must not escape Telethon's handler,
+                    # pause an entire rib, or prevent lower-priority ribs from
+                    # seeing the same update.
+                    log.warning(
+                        "Evento ignorado em módulo=%s: canal/grupo inacessível",
+                        item.module_id,
+                    )
+                    continue
         finally:
             self.active_events.discard(task)
 
