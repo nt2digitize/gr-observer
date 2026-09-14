@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
+from telethon import functions, types
+
 from ..group_contact_flow import GroupContactFlow
+from ..human_timing import typing_seconds
 from .group_reply import GroupReplyModule
 
 
@@ -43,9 +48,50 @@ class GroupReplyWithContacts(GroupReplyModule):
         await self.contact_flow.observe_event(event, sender, module_id=self.module_id)
         return result
 
+    async def _show_human_typing(self, effects, peer: int, text: str, key: str) -> None:
+        """Final visible typing phase; long reading waits stay in durable scheduling."""
+        seconds = typing_seconds(text, key)
+        if seconds <= 0:
+            return
+        try:
+            if effects.before_user_write is not None:
+                await effects.before_user_write()
+            input_peer = await effects.client.get_input_entity(peer)
+            await effects.client(
+                functions.messages.SetTypingRequest(
+                    peer=input_peer,
+                    action=types.SendMessageTypingAction(),
+                )
+            )
+        except Exception:
+            # Typing is cosmetic; the durable send must still proceed.
+            pass
+        await asyncio.sleep(seconds)
+
+    async def action_send_group_reply(self, action: dict, effects) -> dict:
+        payload = action["payload"]
+        text = str(payload.get("text") or "")
+        if text:
+            await self._show_human_typing(
+                effects,
+                int(payload["peer"]),
+                text,
+                f"{action['action_key']}:typing",
+            )
+        return await super().action_send_group_reply(action, effects)
+
     async def action_group_add_contact_reply(self, action: dict, effects) -> dict:
         if not self.contact_flow.add_enabled:
             return {"sent": False, "reason": "feature_disabled"}
+        payload = action["payload"]
+        text = str(payload.get("text") or "")
+        if text:
+            await self._show_human_typing(
+                effects,
+                int(payload["peer"]),
+                text,
+                f"{action['action_key']}:typing",
+            )
         return await self.contact_flow.action_add_contact_reply(action, effects)
 
     async def action_cleanup_protected_group_message(self, action: dict, effects) -> dict:
@@ -79,6 +125,12 @@ class GroupReplyWithContacts(GroupReplyModule):
         text = str(state["template_text"])
         old_message_id = int(state["current_message_id"])
         self._mark_automated_outbound(chat_id, text)
+        await self._show_human_typing(
+            effects,
+            chat_id,
+            text,
+            f"{action['action_key']}:typing",
+        )
         sent = await effects.send_text(
             chat_id, text, f"{action['action_key']}:send"
         )
@@ -130,5 +182,6 @@ class GroupReplyWithContacts(GroupReplyModule):
             f"{base}\n"
             f"ADD por resposta/menção: {add_status}\n"
             f"Proteção de engajamento: {protection_status} "
-            f"({self.contact_flow.protection_seconds // 3600:g} h)"
+            f"({self.contact_flow.protection_seconds // 3600:g} h)\n"
+            "Respostas automáticas usam digitação proporcional; os atrasos de leitura continuam duráveis."
         )
