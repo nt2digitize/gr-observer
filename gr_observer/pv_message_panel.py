@@ -11,6 +11,7 @@ from .catalog import match_command
 from .pv_message_steps import BLOCK_LABELS, MAX_MEDIAN_SECONDS
 
 PAGE_SIZE = 5
+DISPLAY_BLOCK_LABELS = {**BLOCK_LABELS, "live_link": "Mensagem + destino"}
 
 
 class PvMessageEditorPanelMixin:
@@ -204,7 +205,7 @@ class PvMessageEditorPanelMixin:
         for row in current:
             block = str(row["block_key"])
             if block != last_block:
-                lines.append(f"— {BLOCK_LABELS.get(block, block)} —")
+                lines.append(f"— {DISPLAY_BLOCK_LABELS.get(block, block)} —")
                 last_block = block
             content = " ".join(str(row["content"]).split())
             if len(content) > 150:
