@@ -34,8 +34,8 @@ ON telegram_peer_refs(account_user_id,last_seen_at DESC);
 """
 
 
-class PeerReferenceUnavailable(BaseException):
-    """Control-flow signal: no Telegram mutation was attempted for this peer."""
+class PeerReferenceUnavailable(RuntimeError):
+    """Known local resolution miss: no Telegram mutation was attempted."""
 
     def __init__(self, peer_id: int):
         self.peer_id = int(peer_id)
@@ -152,12 +152,19 @@ class DurablePeerStore:
         return updated is not None
 
     async def recover_legacy_waits(self) -> None:
-        """Reclassify only the historical local PeerUser-resolution failure."""
+        """Reclassify only historical local peer-resolution waits, never delete them."""
         if self.account_user_id is None:
             return
         fragment = PEER_ERROR_FRAGMENTS[0]
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # A restart can move a previously parked processing effect to review.
+                # Keep the same row and make it reopenable when its peer wakes.
+                await conn.execute(
+                    """UPDATE telegram_effects SET status='processing',updated_at=NOW()
+                       WHERE last_error LIKE $1""",
+                    f"{WAIT_PREFIX}%",
+                )
                 await conn.execute(
                     """UPDATE telegram_effects effects SET
                          status='processing',last_error=$1,updated_at=NOW()
