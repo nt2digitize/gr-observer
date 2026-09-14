@@ -96,5 +96,8 @@ A PR só pode ser promovida quando:
 
 A PR #34 foi consolidada em `release/pr16-production` pelo merge
 `b10859fa2273ddd0bc2b1dc41446416297dd13f9`. A PR #35 foi então retargetada
-para essa release. Este commit existe para forçar nova validação CI sobre a base
-definitiva antes do merge e do deploy em produção.
+para essa release e validada novamente pelo CI antes do merge final
+`62295d1f79024d937450a5ba387768b5b3853e01`.
+
+Este commit documental registra o gatilho de promoção em produção pela própria
+branch configurada no Railway, sem alteração funcional, de variável ou segredo.
