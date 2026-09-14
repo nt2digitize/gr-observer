@@ -12,7 +12,7 @@ from .catalog import match_command
 from .clean_menu_panel import CleanMenuPanelMixin
 from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
-from .pv_editor_safety import SafePvMessageEditorPanelMixin as PvMessageEditorPanelMixin
+from .pv_editor_policy import PvMessageEditorPanel
 
 
 def register_group_reply(application) -> None:
@@ -25,7 +25,7 @@ def register_group_reply(application) -> None:
 
 class GroupControlPanel(
     CleanMenuPanelMixin,
-    PvMessageEditorPanelMixin,
+    PvMessageEditorPanel,
     BaseControlPanel,
 ):
     """Operator panel with compact menus, group controls and PV copy editor."""
