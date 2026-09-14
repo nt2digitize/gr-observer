@@ -64,7 +64,6 @@ class PriorityStorage(Storage):
                          WHERE actions.status='pending'
                            AND actions.available_at<=NOW()
                          ORDER BY {score_sql},
-                                  ({priority_sql}),
                                   actions.available_at,
                                   actions.id
                          FOR UPDATE OF actions SKIP LOCKED
