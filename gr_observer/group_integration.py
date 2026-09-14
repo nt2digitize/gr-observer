@@ -9,6 +9,7 @@ remains owned by the application spine.
 from __future__ import annotations
 
 from .catalog import match_command
+from .clean_menu_panel import CleanMenuPanelMixin
 from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
 from .pv_message_panel import PvMessageEditorPanelMixin
@@ -22,8 +23,12 @@ def register_group_reply(application) -> None:
     )
 
 
-class GroupControlPanel(PvMessageEditorPanelMixin, BaseControlPanel):
-    """Panel adapter for group controls plus the PV copy editor surface."""
+class GroupControlPanel(
+    CleanMenuPanelMixin,
+    PvMessageEditorPanelMixin,
+    BaseControlPanel,
+):
+    """Operator panel with compact menus, group controls and PV copy editor."""
 
     async def on_message(self, event) -> None:
         if not self.app.is_admin(event):
