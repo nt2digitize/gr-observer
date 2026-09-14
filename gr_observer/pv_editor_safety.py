@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 
-from telethon import Button, events
+from telethon import Button
 
 from .catalog import match_command
+from .pv_message_panel import PvMessageEditorPanelMixin as _BasePvMessageEditorPanelMixin
 
 
 class PvEditorSafetyMixin:
@@ -28,20 +29,16 @@ class PvEditorSafetyMixin:
         if self.app.is_admin(event) and self.pv_editor_pending:
             data = event.data.decode("utf-8", errors="replace")
             if self._editor_navigation(data):
-                # Navigation means "leave without saving".  Production copy stays intact.
                 self.pv_editor_pending = None
         await super().on_callback(event)
 
     async def on_message(self, event) -> None:
         if self.app.is_admin(event) and self.pv_editor_pending:
             raw = event.raw_text or ""
-            # A real panel command is navigation, not replacement copy.
             if match_command(raw, "panel"):
                 self.pv_editor_pending = None
                 await super().on_message(event)
                 return
-            # Telegram cannot send an empty text message, but a photo/sticker while
-            # editing has empty raw_text.  Never interpret that as "delete".
             if self.pv_editor_pending.get("mode") == "text" and not raw.strip():
                 pending = dict(self.pv_editor_pending)
                 self.pv_editor_pending = None
@@ -57,8 +54,6 @@ class PvEditorSafetyMixin:
         *,
         sequence_root: int | None = None,
     ) -> None:
-        # Legacy "empty" callbacks used to delete the row.  Deletion must now be
-        # explicit and confirmed through the dedicated Excluir button only.
         if action == "empty":
             row = await self._message_store().get(step_id)
             if row is None:
@@ -103,3 +98,10 @@ class PvEditorSafetyMixin:
             "Sair ou tocar em Manter atual preserva a produção.",
             [[Button.inline("✅ Manter atual", b"pvm:cancel")]],
         )
+
+
+class SafePvMessageEditorPanelMixin(
+    PvEditorSafetyMixin,
+    _BasePvMessageEditorPanelMixin,
+):
+    """Drop-in replacement preserving the original panel composition slot."""
