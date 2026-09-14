@@ -49,9 +49,8 @@ class PvReplyWithContacts(PvMessageRuntimeMixin, PvReplyModule):
                     return
                 await conn.execute(
                     """UPDATE pv_message_steps
-                       SET position=$2, label='Destino', updated_at=NOW()
+                       SET position=$1, label='Destino', updated_at=NOW()
                        WHERE step_key='live.link' AND block_key='live_link'""",
-                    POSITION_GAP,
                     POSITION_GAP * 2,
                 )
                 await conn.execute(
