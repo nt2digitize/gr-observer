@@ -46,11 +46,16 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertIn("radar.scan_task = None", source)
         self.assertNotIn("scan_loop()", source)
 
-    def test_railway_entrypoint_installs_safety_mixin(self):
+    def test_railway_entrypoint_composes_governor_with_pv_guard(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn("ProductionSafetyMixin", source)
+        self.assertIn("PvProductionGuardMixin", source)
         self.assertIn("DurablePeerObserverMixin", source)
         self.assertIn("FloodAwareObserverMixin", source)
+        self.assertIn(
+            "ProductionSafetyMixin,\n    PvProductionGuardMixin,",
+            source,
+        )
 
     def test_floodwait_is_deferred_not_slept_inside_effect(self):
         source = inspect.getsource(SafeTelegramEffects.perform)
