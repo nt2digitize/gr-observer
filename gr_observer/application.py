@@ -15,8 +15,8 @@ from .group_integration import GroupControlPanel, register_group_reply
 from .modules.botson import BotsonModule
 from .modules.pv_reply_production import PvReplyProduction
 from .modules.radar_passive import PassiveRadarModule
+from .priority_storage import PriorityStorage
 from .registry import ModuleRegistry
-from .storage import Storage
 from .telegram_peers import DurablePeerStore, DurableTelegramClient
 from .traffic import SafeOutboxWriter, SignalLedger
 
@@ -61,7 +61,7 @@ class Observer:
 
     async def setup(self) -> None:
         self.pool = await asyncpg.create_pool(self.db_url, min_size=1, max_size=6)
-        self.storage = Storage(self.pool)
+        self.storage = PriorityStorage(self.pool)
         await self.storage.initialize()
         self.peer_store = DurablePeerStore(self.pool)
         await self.peer_store.ensure_schema()

@@ -1,6 +1,5 @@
 import inspect
 import unittest
-from pathlib import Path
 
 from telethon import errors
 
@@ -11,10 +10,7 @@ from gr_observer.outbox import (
     TelegramEffects,
     action_lane,
 )
-
-
-ROOT = Path(__file__).resolve().parent
-STORAGE = (ROOT / "gr_observer" / "storage.py").read_text(encoding="utf-8")
+from gr_observer.priority_storage import PriorityStorage
 
 
 class ReviewSemanticsTests(unittest.TestCase):
@@ -32,10 +28,12 @@ class ReviewSemanticsTests(unittest.TestCase):
             action_lane({"module_id": "pv_reply", "payload": {"peer": 222}}),
         )
 
-    def test_global_queue_claim_does_not_wait_for_one_peer(self):
-        self.assertIn("actions.available_at<=NOW()", STORAGE)
-        self.assertIn("ORDER BY actions.available_at,actions.id", STORAGE)
-        self.assertIn("SKIP LOCKED", STORAGE)
+    def test_global_queue_claim_is_ready_only_atomic_and_nonblocking(self):
+        source = inspect.getsource(PriorityStorage.claim_next_action)
+        self.assertIn("actions.available_at<=NOW()", source)
+        self.assertIn("FOR UPDATE OF actions SKIP LOCKED", source)
+        self.assertIn("conn.transaction()", source)
+        self.assertIn("outbox_scheduler_state", source)
 
     def test_conclusive_telegram_4xx_is_not_review(self):
         self.assertIn(errors.BadRequestError, DEFINITIVE_RPC_ERRORS)
