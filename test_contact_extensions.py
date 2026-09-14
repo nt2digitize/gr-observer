@@ -118,7 +118,7 @@ class KillSwitchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProtectionAttributionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_bare_mention_does_not_protect_current_loop_post(self):
+    async def test_bare_direct_mention_protects_current_loop_post(self):
         flow = GroupContactFlow(SimpleNamespace())
         flow.me = SimpleNamespace(id=999, username="RadarTeste")
         flow.add_enabled = False
@@ -129,8 +129,28 @@ class ProtectionAttributionTests(unittest.IsolatedAsyncioTestCase):
         event = SimpleNamespace(chat_id=-1001, raw_text="@RadarTeste você é do RJ?", id=77)
         sender = SimpleNamespace(id=42)
         await flow.observe_event(event, sender, module_id="group_reply")
-        flow._protect_message.assert_not_awaited()
+        flow._current_repost_message.assert_awaited_once_with(-1001)
+        flow._protect_message.assert_awaited_once_with(
+            chat_id=-1001,
+            message_id=10,
+            reason="mention",
+            event_id=77,
+            module_id="group_reply",
+        )
+
+    async def test_unrelated_mention_does_not_protect_current_loop_post(self):
+        flow = GroupContactFlow(SimpleNamespace())
+        flow.me = SimpleNamespace(id=999, username="RadarTeste")
+        flow.add_enabled = False
+        flow.protection_enabled = True
+        flow._reply_context = AsyncMock(return_value=(False, None))
+        flow._current_repost_message = AsyncMock(return_value=10)
+        flow._protect_message = AsyncMock()
+        event = SimpleNamespace(chat_id=-1001, raw_text="@OutraPessoa você é do RJ?", id=78)
+        sender = SimpleNamespace(id=42)
+        await flow.observe_event(event, sender, module_id="group_reply")
         flow._current_repost_message.assert_not_awaited()
+        flow._protect_message.assert_not_awaited()
 
 
 class ProtectedRepostTests(unittest.IsolatedAsyncioTestCase):
