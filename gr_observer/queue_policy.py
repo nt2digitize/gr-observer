@@ -138,7 +138,6 @@ def choose_ready_action(
                 lane=action.lane,
                 last_lane=last_lane,
             ),
-            base_priority(action.module_id, action.action_type),
             action.available_at,
             action.key,
         ),
