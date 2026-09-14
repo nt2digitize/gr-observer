@@ -1,8 +1,4 @@
-"""Persistent FloodWait telemetry exposed only to the control-panel admin.
-
-This component observes warning logs produced by the existing Telegram runtime.
-It never changes module state and never calls the Telegram user session.
-"""
+"""Persistent FloodWait telemetry exposed only to the control-panel admin."""
 
 from __future__ import annotations
 
@@ -43,7 +39,7 @@ def flood_origin(logger_name: str, message: str) -> tuple[str, str]:
     text = (message or "").casefold()
     if "radar" in logger or text.startswith("radar aguardando floodwait"):
         return "radar", "varredura"
-    if "outbox" in logger or text.startswith("outbox aguardando floodwait"):
+    if "outbox" in logger or "traffic" in logger or text.startswith("outbox aguardando floodwait"):
         return "outbox", "writer"
     return "core", "sessão"
 
@@ -87,8 +83,6 @@ class _FloodLogHandler(logging.Handler):
         self.monitor = monitor
 
     def emit(self, record: logging.LogRecord) -> None:
-        # Only real warning/error events are captured. Startup INFO lines may
-        # contain a stale persisted FloodWait reason and must not become events.
         if record.levelno < logging.WARNING:
             return
         try:
@@ -105,12 +99,12 @@ class _FloodLogHandler(logging.Handler):
             self.monitor.tasks.add(task)
             task.add_done_callback(self.monitor.tasks.discard)
         except Exception:
-            # Observability must never break the user runtime or recurse through
-            # logging while handling a logging failure.
             return
 
 
 class FloodMonitor:
+    """Observability component; never mutates the USER session or module state."""
+
     def __init__(self, application) -> None:
         self.app = application
         self.handler = _FloodLogHandler(self)
@@ -144,7 +138,6 @@ class FloodMonitor:
                 max(1, int(seconds)),
             )
         except Exception:
-            # Never log here: that could recurse through this logging handler.
             return
 
     async def on_message(self, event) -> None:
@@ -162,7 +155,6 @@ class FloodMonitor:
             """SELECT module_id,source,wait_seconds,observed_at
                FROM flood_events ORDER BY observed_at DESC,id DESC LIMIT 10"""
         )
-
         lines = ["🌊 FLOODWAIT", ""]
         if current:
             lines.append("Estado atual:")
@@ -183,12 +175,9 @@ class FloodMonitor:
                     if remaining
                     else "janela estimada já terminou; módulo segue pausado até ser religado"
                 )
-                lines.append(
-                    f"• {row['module_id']}: {format_duration(seconds)} — {suffix}"
-                )
+                lines.append(f"• {row['module_id']}: {format_duration(seconds)} — {suffix}")
         else:
             lines.append("Estado atual: nenhum módulo marcado por FloodWait.")
-
         lines.extend(("", "Últimos eventos registrados:"))
         if not history:
             lines.append("• Nenhum evento registrado desde a instalação do /flood.")
@@ -196,30 +185,7 @@ class FloodMonitor:
             for row in history:
                 lines.append(
                     f"• {relative_age(row['observed_at'], now)} — "
-                    f"{row['module_id']}/{row['source']}: "
-                    f"{format_duration(row['wait_seconds'])}"
+                    f"{row['module_id']}/{row['source']}: {format_duration(row['wait_seconds'])}"
                 )
-        lines.extend(
-            (
-                "",
-                "O tempo vem do próprio Telegram. O comando só consulta; não religa nada.",
-            )
-        )
+        lines.extend(("", "O tempo vem do próprio Telegram. O comando só consulta; não religa nada."))
         return "\n".join(lines)[:3900]
-
-
-class FloodAwareObserverMixin:
-    """Lifecycle mixin used explicitly by the Railway entry point."""
-
-    async def setup(self) -> None:
-        await super().setup()
-        self.flood_monitor = FloodMonitor(self)
-        await self.flood_monitor.start()
-
-    async def run(self) -> None:
-        try:
-            await super().run()
-        finally:
-            monitor = getattr(self, "flood_monitor", None)
-            if monitor is not None:
-                await monitor.stop()

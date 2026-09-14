@@ -1,4 +1,4 @@
-"""Compatibility entry point for Railway and existing local commands."""
+"""Railway entry point for the canonical GR Observer composition root."""
 
 import asyncio
 import logging
@@ -8,10 +8,6 @@ from dotenv import load_dotenv
 
 from gr_observer.application import Observer
 from gr_observer.config import missing_panel_env
-from gr_observer.durable_peers import DurablePeerObserverMixin
-from gr_observer.flood_monitor import FloodAwareObserverMixin
-from gr_observer.pv_production_guard import PvProductionGuardMixin
-from gr_observer.runtime_safety import ProductionSafetyMixin
 
 load_dotenv()
 logging.basicConfig(
@@ -21,19 +17,9 @@ logging.basicConfig(
 log = logging.getLogger("gr-observer")
 
 
-class RuntimeObserver(
-    FloodAwareObserverMixin,
-    ProductionSafetyMixin,
-    PvProductionGuardMixin,
-    DurablePeerObserverMixin,
-    Observer,
-):
-    """Production root with traffic safety, PV guards and durable peers."""
-
-
 if __name__ == "__main__":
     missing = missing_panel_env()
     if missing:
         log.error("Configuração pendente: %s. Painel não iniciado.", ", ".join(missing))
         raise SystemExit(0)
-    asyncio.run(RuntimeObserver().run())
+    asyncio.run(Observer().run())

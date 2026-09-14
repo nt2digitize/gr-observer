@@ -1,4 +1,4 @@
-"""Composition root and the single Telegram user-session runtime."""
+"""Composition root and the single Telegram USER-session runtime."""
 
 from __future__ import annotations
 
@@ -10,19 +10,21 @@ from telethon import TelegramClient, errors, events
 from telethon.sessions import MemorySession, StringSession
 
 from .config import Settings
+from .flood_monitor import FloodMonitor
 from .group_integration import GroupControlPanel, register_group_reply
 from .modules.botson import BotsonModule
-from .modules.pv_reply_contacts import PvReplyWithContacts
-from .modules.radar import RadarModule
-from .outbox import OutboxWriter
+from .modules.pv_reply_production import PvReplyProduction
+from .modules.radar_passive import PassiveRadarModule
 from .registry import ModuleRegistry
 from .storage import Storage
+from .telegram_peers import DurablePeerStore, DurableTelegramClient
+from .traffic import SafeOutboxWriter, SignalLedger
 
 log = logging.getLogger("gr-observer")
 
 
 class Observer:
-    """Modular monolith kept under the historical public class name."""
+    """Modular-monolith composition root; sole owner of the USER runtime."""
 
     USER_SESSION_LOCK_KEY = 5139241886192644145
     USER_SESSION_HANDOFF_SECONDS = 3
@@ -38,6 +40,9 @@ class Observer:
         )
         self.pool = None
         self.storage = None
+        self.peer_store = None
+        self.signal_ledger = None
+        self.flood_monitor = None
         self.registry = ModuleRegistry()
         self.control_panel = None
         self.user = None
@@ -58,12 +63,18 @@ class Observer:
         self.pool = await asyncpg.create_pool(self.db_url, min_size=1, max_size=6)
         self.storage = Storage(self.pool)
         await self.storage.initialize()
+        self.peer_store = DurablePeerStore(self.pool)
+        await self.peer_store.ensure_schema()
+        self.signal_ledger = SignalLedger(self.pool)
+        await self.signal_ledger.ensure_schema()
+
         self.registry.register(
             "radar",
-            RadarModule(self.pool, self.settings, self.pause_module),
+            PassiveRadarModule(self.pool, self.settings, self.pause_module),
         )
         self.registry.register(
-            "pv_reply", PvReplyWithContacts(self.storage, self.settings)
+            "pv_reply",
+            PvReplyProduction(self.storage, self.settings),
         )
         register_group_reply(self)
         self.registry.register("botson", BotsonModule(self.storage, self.settings))
@@ -75,19 +86,22 @@ class Observer:
                 item.enabled = False
                 item.reason = blocker
                 await self.storage.set_module_state(item.module_id, False, blocker)
+
         radar = self.registry.get("radar")
         self.state_reason = radar.reason
         self.enabled = radar.enabled
         await self.panel.start(bot_token=self.settings.control_bot_token)
         self.control_panel = GroupControlPanel(self)
         self.control_panel.register_handlers()
+        self.flood_monitor = FloodMonitor(self)
+        await self.flood_monitor.start()
         if self.registry.enabled():
             self.worker = asyncio.create_task(
                 self.user_runtime(), name="telegram-user-runtime"
             )
 
     async def apply_startup_requests(self) -> None:
-        """Honor an explicit first-deploy opt-in without defeating later pauses."""
+        """Honor first-deploy PV opt-in without defeating a later manual pause."""
         item = self.registry.get("pv_reply")
         if (
             not self.settings.pv_reply_auto_enable
@@ -101,7 +115,11 @@ class Observer:
         await self.storage.set_module_state(item.module_id, True, item.reason)
 
     def is_admin(self, event) -> bool:
-        return bool(event.is_private and int(event.sender_id) == self.admin_id)
+        return bool(
+            event.is_private
+            and event.sender_id is not None
+            and int(event.sender_id) == self.admin_id
+        )
 
     async def action_notify_admin(self, action: dict, effects) -> dict:
         return await effects.send_panel_text(
@@ -117,9 +135,7 @@ class Observer:
                 "SELECT pg_try_advisory_lock($1)", self.USER_SESSION_LOCK_KEY
             )
             if not acquired:
-                log.info(
-                    "Outro deploy ainda usa a sessão; aguardando encerramento seguro"
-                )
+                log.info("Outro deploy ainda usa a sessão; aguardando encerramento seguro")
                 await conn.execute(
                     "SELECT pg_advisory_lock($1)", self.USER_SESSION_LOCK_KEY
                 )
@@ -159,11 +175,12 @@ class Observer:
         item = self.registry.get(module_id)
         await item.implementation.on_connect(self.user, self.me)
         self.connected_modules.add(module_id)
-        item.reason = "Ligado"
-        await self.storage.set_module_reason(module_id, "Ligado")
+        reason = str(getattr(item.implementation, "connection_reason", "Ligado"))
+        item.reason = reason
+        await self.storage.set_module_reason(module_id, reason)
         if module_id == "radar":
             self.enabled = True
-            self.state_reason = "Ligado"
+            self.state_reason = reason
 
     async def _disconnect_module(self, module_id: str) -> None:
         if module_id not in self.connected_modules:
@@ -215,8 +232,6 @@ class Observer:
                 self.enabled = False
                 self.state_reason = item.reason
 
-            # Cancel an active-writing rib at the process boundary. Any
-            # interrupted effect remains in review and is not blindly replayed.
             if item.spec["active_writes"] and self.user is not None:
                 await self.stop_worker()
                 if self.registry.enabled():
@@ -234,7 +249,7 @@ class Observer:
     async def set_enabled(
         self, enabled: bool, reason="Pausado pelo administrador"
     ) -> str:
-        """Compatibility for the original /ligar and /desligar API."""
+        """Compatibility for historical /ligar and /desligar API."""
         if not enabled and reason != "Pausado pelo administrador":
             item = self.registry.get("radar")
             item.enabled = False
@@ -274,8 +289,17 @@ class Observer:
         task = asyncio.current_task()
         self.active_events.add(task)
         try:
-            # Dispatch order is data. Operational commands get first refusal;
-            # ordinary events can still reach lower-priority observer ribs.
+            try:
+                if self.signal_ledger is not None and self.me is not None:
+                    await self.signal_ledger.observe_event(event, self.me)
+            except Exception as exc:
+                log.warning("Signal Ledger ignorou falha local erro=%s", type(exc).__name__)
+            try:
+                if self.peer_store is not None:
+                    await self.peer_store.remember_event(event)
+            except Exception as exc:
+                log.warning("Peer store ignorou falha local erro=%s", type(exc).__name__)
+
             items = sorted(
                 self.registry.enabled(),
                 key=lambda item: item.spec["dispatch_order"],
@@ -292,10 +316,6 @@ class Observer:
                         f"Pausado por FloodWait ({exc.seconds}s); revisar antes de ligar",
                     )
                 except errors.ChannelPrivateError:
-                    # A stale/private/left channel is a definitive read failure
-                    # for this event only. It must not escape Telethon's handler,
-                    # pause an entire rib, or prevent lower-priority ribs from
-                    # seeing the same update.
                     log.warning(
                         "Evento ignorado em módulo=%s: canal/grupo inacessível",
                         item.module_id,
@@ -319,17 +339,19 @@ class Observer:
             self.worker = None
 
     async def user_runtime(self) -> None:
+        """The only USER session, Outbox Writer and connection lifecycle."""
         session_lock = None
-        runtime_tasks = []
+        runtime_tasks: list[asyncio.Task] = []
         self.session_authorized = False
         try:
             session_lock = await self.acquire_user_session_lock()
             await self.storage.recover_interrupted()
-            self.user = TelegramClient(
+            self.user = DurableTelegramClient(
                 StringSession(self.settings.user_session_string),
                 self.api_id,
                 self.api_hash,
                 flood_sleep_threshold=0,
+                peer_store=self.peer_store,
             )
             self.user.add_event_handler(self.guarded_dispatch, events.NewMessage())
             await self.user.connect()
@@ -337,11 +359,14 @@ class Observer:
                 raise RuntimeError("Sessão não autorizada")
             self.me = await self.user.get_me()
             self.session_authorized = True
-            self.writer = OutboxWriter(
+            await self.peer_store.bind_account(int(self.me.id))
+
+            self.writer = SafeOutboxWriter(
                 self.storage,
                 self.user,
                 panel_client=self.panel,
                 module_enabled=lambda module_id: self.registry.get(module_id).enabled,
+                peer_store=self.peer_store,
             )
             self.writer.register("core", "notify_admin", self.action_notify_admin)
             for item in self.registry.ordered():
@@ -350,6 +375,7 @@ class Observer:
                     register(self.writer)
             for item in self.registry.enabled():
                 await self._connect_module(item.module_id)
+
             self.writer_task = asyncio.create_task(
                 self.writer.run(), name="outbox-writer"
             )
@@ -426,13 +452,16 @@ class Observer:
         try:
             await self.setup()
             log.info(
-                "Painel GR Observer online; %s", self.status_text().replace("\n", " | ")
+                "Painel GR Observer online; %s",
+                self.status_text().replace("\n", " | "),
             )
             await self.panel.run_until_disconnected()
         finally:
             await self.stop_worker()
             if self.pause_tasks:
                 await asyncio.gather(*list(self.pause_tasks), return_exceptions=True)
+            if self.flood_monitor is not None:
+                await self.flood_monitor.stop()
             await self.panel.disconnect()
             if self.pool:
                 await self.pool.close()

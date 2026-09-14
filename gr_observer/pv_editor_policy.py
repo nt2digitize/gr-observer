@@ -1,4 +1,4 @@
-"""Non-destructive operator UX for the PV message editor."""
+"""Canonical non-destructive operator policy for the PV message editor."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from .catalog import match_command
 from .pv_message_panel import PvMessageEditorPanelMixin as _BasePvMessageEditorPanelMixin
 
 
-class PvEditorSafetyMixin:
-    """Opening or leaving an editor never mutates production copy."""
+class PvEditorPolicyMixin:
+    """Editor navigation never mutates copy; explicit input is required to edit."""
 
     @staticmethod
     def _editor_navigation(data: str) -> bool:
@@ -26,7 +26,6 @@ class PvEditorSafetyMixin:
         )
 
     def _resolved_destination(self, content: str) -> str | None:
-        """Return the destination the runtime would substitute for a placeholder."""
         value = content or ""
         if "{preview_link}" in value:
             return str(getattr(self.app.settings, "pv_preview_link", "") or "").strip() or None
@@ -97,25 +96,20 @@ class PvEditorSafetyMixin:
         await event.answer()
         current = str(row["content"] or "")
         resolved = self._resolved_destination(current)
-        destination = (
-            f"\n\nDestino que será enviado agora:\n{resolved}"
-            if resolved
-            else ""
-        )
+        destination = f"\n\nDestino que será enviado agora:\n{resolved}" if resolved else ""
         await self._render_editor(
             event,
             "✏️ EDITAR FALA\n\n"
             "Texto salvo (copie, edite e envie):\n\n"
-            f"{current}"
-            f"{destination}\n\n"
+            f"{current}{destination}\n\n"
             "Nada muda enquanto você não enviar um novo texto. "
             "Sair ou tocar em Manter atual preserva a produção.",
             [[Button.inline("✅ Manter atual", b"pvm:cancel")]],
         )
 
 
-class SafePvMessageEditorPanelMixin(
-    PvEditorSafetyMixin,
+class PvMessageEditorPanel(
+    PvEditorPolicyMixin,
     _BasePvMessageEditorPanelMixin,
 ):
-    """Drop-in replacement preserving the original panel composition slot."""
+    """Final PV editor surface composed statically at import time."""

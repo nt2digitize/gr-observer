@@ -1,9 +1,14 @@
+import inspect
 import unittest
 from types import SimpleNamespace
 
 from telethon import types
 
-from gr_observer.durable_peers import DurablePeerObserverMixin
+from gr_observer.telegram_peers import (
+    DurablePeerStore,
+    DurableTelegramClient,
+    PeerReferenceUnavailable,
+)
 
 
 class FakePool:
@@ -24,87 +29,61 @@ class FakePool:
         return None
 
 
-class FakeClient:
-    def __init__(self):
-        self.calls = []
-
-    async def get_input_entity(self, peer):
-        self.calls.append(peer)
-        if peer == "cached":
-            return "cached-result"
-        raise ValueError(f"missing entity {peer}")
-
-
-class BaseObserver:
-    def __init__(self):
-        self.pool = FakePool()
-        self.user = FakeClient()
-        self.me = SimpleNamespace(id=999)
-        self.connected = []
-        self.dispatched = []
-
-    async def _connect_module(self, module_id):
-        self.connected.append(module_id)
-
-    async def guarded_dispatch(self, event):
-        self.dispatched.append(event)
-
-
-class ObserverHarness(DurablePeerObserverMixin, BaseObserver):
-    pass
-
-
 class DurablePeerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cached_resolution_still_wins(self):
-        app = ObserverHarness()
-        await app._install_durable_peer_resolver()
-        self.assertEqual(await app.user.get_input_entity("cached"), "cached-result")
-
-    async def test_numeric_peer_falls_back_to_persisted_access_hash(self):
-        app = ObserverHarness()
-        app.pool.rows[(999, 42)] = 123456789
-        await app._install_durable_peer_resolver()
-        resolved = await app.user.get_input_entity(42)
+    async def test_numeric_peer_resolves_from_account_scoped_reference(self):
+        pool = FakePool()
+        pool.rows[(999, 42)] = 123456789
+        store = DurablePeerStore(pool)
+        store.account_user_id = 999
+        resolved = await store.resolve_user(42)
         self.assertIsInstance(resolved, types.InputPeerUser)
         self.assertEqual(resolved.user_id, 42)
         self.assertEqual(resolved.access_hash, 123456789)
 
     async def test_peer_reference_is_scoped_to_operator_account(self):
-        app = ObserverHarness()
-        app.pool.rows[(111, 42)] = 123456789
-        await app._install_durable_peer_resolver()
-        with self.assertRaises(ValueError):
-            await app.user.get_input_entity(42)
+        pool = FakePool()
+        pool.rows[(111, 42)] = 123456789
+        store = DurablePeerStore(pool)
+        store.account_user_id = 999
+        self.assertIsNone(await store.resolve_user(42))
 
-    async def test_inbound_private_input_sender_is_persisted(self):
-        app = ObserverHarness()
+    async def test_inbound_private_input_sender_is_persisted_and_wakes_peer(self):
+        pool = FakePool()
+        store = DurablePeerStore(pool)
+        store.account_user_id = 999
         event = SimpleNamespace(
             out=False,
             is_private=True,
             input_sender=types.InputPeerUser(user_id=42, access_hash=987654321),
         )
-        await app.guarded_dispatch(event)
-        self.assertEqual(app.pool.rows[(999, 42)], 987654321)
-        self.assertEqual(app.dispatched, [event])
+        await store.remember_event(event)
+        self.assertEqual(pool.rows[(999, 42)], 987654321)
+        sql = "\n".join(query for query, _ in pool.executed)
+        self.assertIn("payload->>'peer'=$1", sql)
 
-    async def test_zero_hash_is_not_persisted_and_event_still_dispatches(self):
-        app = ObserverHarness()
+    async def test_zero_hash_is_not_persisted(self):
+        pool = FakePool()
+        store = DurablePeerStore(pool)
+        store.account_user_id = 999
         event = SimpleNamespace(
             out=False,
             is_private=True,
             input_sender=types.InputPeerUser(user_id=42, access_hash=0),
         )
-        await app.guarded_dispatch(event)
-        self.assertNotIn((999, 42), app.pool.rows)
-        self.assertEqual(app.dispatched, [event])
+        await store.remember_event(event)
+        self.assertNotIn((999, 42), pool.rows)
 
-    async def test_resolver_is_installed_before_module_connect(self):
-        app = ObserverHarness()
-        app.pool.rows[(999, 77)] = 222333444
-        await app._connect_module("pv_reply")
-        resolved = await app.user.get_input_entity(77)
-        self.assertEqual(resolved.access_hash, 222333444)
-        self.assertEqual(app.connected, ["pv_reply"])
+    def test_client_fallback_is_static_class_behavior_not_monkey_patch(self):
+        source = inspect.getsource(DurableTelegramClient.get_input_entity)
+        self.assertIn("super().get_input_entity", source)
+        self.assertIn("resolve_user", source)
+        self.assertIn("PeerReferenceUnavailable", source)
+        module_source = inspect.getsource(DurableTelegramClient)
+        self.assertNotIn("client.get_input_entity =", module_source)
+
+    def test_missing_peer_is_regular_exception_for_explicit_boundary_handling(self):
+        self.assertTrue(issubclass(PeerReferenceUnavailable, Exception))
+        self.assertTrue(issubclass(PeerReferenceUnavailable, BaseException))
 
 
 if __name__ == "__main__":

@@ -4,11 +4,12 @@ import inspect
 import unittest
 from pathlib import Path
 
+from gr_observer.application import Observer
+from gr_observer.modules.radar_passive import PassiveRadarModule
 from gr_observer.outbox import OutboxWriter, TelegramEffects
-from gr_observer.runtime_safety import (
-    SAFETY_SCHEMA,
+from gr_observer.traffic import (
+    TRAFFIC_SCHEMA,
     DeferredTraffic,
-    ProductionSafetyMixin,
     SafeOutboxWriter,
     SafeTelegramEffects,
     telegram_links,
@@ -29,39 +30,43 @@ class RuntimeSafetyTests(unittest.TestCase):
             ("t.me/+AbC_123", "https://t.me/grupo_teste"),
         )
 
-    def test_safety_schema_is_additive_and_persistent(self):
-        self.assertIn("CREATE TABLE IF NOT EXISTS traffic_cooldowns", SAFETY_SCHEMA)
-        self.assertIn("CREATE TABLE IF NOT EXISTS traffic_events", SAFETY_SCHEMA)
-        self.assertIn("CREATE TABLE IF NOT EXISTS system_signals", SAFETY_SCHEMA)
-        self.assertNotIn("DROP TABLE", SAFETY_SCHEMA.upper())
-        self.assertNotIn("TRUNCATE", SAFETY_SCHEMA.upper())
+    def test_traffic_schema_is_additive_and_persistent(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS traffic_cooldowns", TRAFFIC_SCHEMA)
+        self.assertIn("CREATE TABLE IF NOT EXISTS traffic_events", TRAFFIC_SCHEMA)
+        self.assertIn("CREATE TABLE IF NOT EXISTS system_signals", TRAFFIC_SCHEMA)
+        self.assertNotIn("DROP TABLE", TRAFFIC_SCHEMA.upper())
+        self.assertNotIn("TRUNCATE", TRAFFIC_SCHEMA.upper())
 
     def test_safe_writer_preserves_single_writer_type(self):
         self.assertTrue(issubclass(SafeOutboxWriter, OutboxWriter))
         self.assertTrue(issubclass(SafeTelegramEffects, TelegramEffects))
 
     def test_radar_runtime_policy_is_passive(self):
-        source = inspect.getsource(ProductionSafetyMixin._connect_module)
-        self.assertIn('module_id != "radar"', source)
-        self.assertIn("radar.scan_task = None", source)
-        self.assertNotIn("scan_loop()", source)
+        source = inspect.getsource(PassiveRadarModule.on_connect)
+        self.assertIn("self.scan_task = None", source)
+        self.assertNotIn("scan_loop", source)
+        self.assertNotIn("create_task", source)
 
-    def test_railway_entrypoint_composes_governor_with_pv_guard(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("ProductionSafetyMixin", source)
-        self.assertIn("PvProductionGuardMixin", source)
-        self.assertIn("DurablePeerObserverMixin", source)
-        self.assertIn("FloodAwareObserverMixin", source)
-        self.assertIn(
-            "ProductionSafetyMixin,\n    PvProductionGuardMixin,",
-            source,
-        )
+    def test_application_owns_safe_runtime_directly(self):
+        source = inspect.getsource(Observer.user_runtime)
+        self.assertIn("DurableTelegramClient", source)
+        self.assertIn("SafeOutboxWriter", source)
+        self.assertNotIn("super().user_runtime", source)
+        entrypoint = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("asyncio.run(Observer().run())", entrypoint)
+        self.assertNotIn("RuntimeObserver", entrypoint)
 
     def test_floodwait_is_deferred_not_slept_inside_effect(self):
         source = inspect.getsource(SafeTelegramEffects.perform)
         self.assertIn("record_flood_wait", source)
-        self.assertIn("raise DeferredTraffic", source)
+        self.assertIn("DeferredTraffic", source)
         self.assertNotIn("asyncio.sleep", source)
+
+    def test_floodwait_journal_is_preserved_not_deleted(self):
+        source = inspect.getsource(SafeTelegramEffects.perform)
+        governor = inspect.getsource(SafeOutboxWriter)
+        self.assertNotIn("DELETE FROM telegram_effects", source)
+        self.assertNotIn("DELETE FROM telegram_effects", governor)
 
 
 if __name__ == "__main__":

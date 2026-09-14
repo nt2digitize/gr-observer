@@ -1,8 +1,12 @@
 import asyncio
+import inspect
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from gr_observer.pv_editor_safety import PvEditorSafetyMixin
-from gr_observer.pv_production_guard import PvProductionGuardMixin, pv_has_link
+from gr_observer.modules.pv_reply_contacts import PvReplyWithContacts
+from gr_observer.modules.pv_reply_production import PvReplyProduction
+from gr_observer.pv_editor_policy import PvEditorPolicyMixin
 
 
 class _Pool:
@@ -19,98 +23,56 @@ class _Pool:
 class _Storage:
     def __init__(self):
         self.pool = _Pool()
-        self.active = 0
-        self.max_active = 0
-
-    async def accept_pv_message(self, *args, **kwargs):
-        self.active += 1
-        self.max_active = max(self.max_active, self.active)
-        await asyncio.sleep(0.01)
-        self.active -= 1
-        return kwargs["user_id"]
 
 
-class _PV:
-    def __init__(self, storage):
-        self.storage = storage
-        self.original_step_calls = 0
-        self.last_context = None
+class ProductionPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_user_events_are_serialized_by_static_class_policy(self):
+        module = PvReplyProduction.__new__(PvReplyProduction)
+        module._accept_locks = [asyncio.Lock() for _ in range(module._LOCK_STRIPES)]
+        active = 0
+        max_active = 0
 
-    async def _queue_sequence_continuation(self, **kwargs):
-        self.last_context = kwargs["context"]
-        return True
+        async def fake_base(_self, event):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return False
 
-    async def action_send_message_step(self, action, effects):
-        self.original_step_calls += 1
-        return {"sent": True}
-
-
-class _Registry:
-    def __init__(self, pv):
-        self.pv = pv
-
-    def get(self, module_id):
-        return type("Item", (), {"implementation": self.pv})()
-
-
-class _GuardHost(PvProductionGuardMixin):
-    def __init__(self):
-        self.storage = _Storage()
-        self.pv = _PV(self.storage)
-        self.registry = _Registry(self.pv)
-
-
-class ProductionGuardTests(unittest.IsolatedAsyncioTestCase):
-    def test_linkish_text_gets_preview(self):
-        self.assertTrue(pv_has_link("olha aqui https://example.com/x"))
-        self.assertTrue(pv_has_link("grupo t.me/exemplo"))
-        self.assertTrue(pv_has_link("www.example.com/teste"))
-        self.assertFalse(pv_has_link("texto sem endereço"))
-
-    async def test_same_user_state_transition_is_serialized(self):
-        host = _GuardHost()
-        host._install_pv_production_guards()
-        await asyncio.gather(
-            host.storage.accept_pv_message(user_id=55),
-            host.storage.accept_pv_message(user_id=55),
-        )
-        self.assertEqual(host.storage.max_active, 1)
-
-    async def test_new_continuation_receives_state_token(self):
-        host = _GuardHost()
-        host._install_pv_production_guards()
-        await host.pv._queue_sequence_continuation(
-            peer=55, origin_key="x", block_key="greeting", branch_key=None,
-            after_position="0", continuation="none", context={"peer": 55},
-            variables={}, prewait=1,
-        )
-        self.assertEqual(
-            host.pv.last_context["_pv_guard"],
-            {"stage": "greeting_queued", "last_inbound_message_id": 10},
-        )
+        event = SimpleNamespace(is_private=True, out=False, sender_id=55)
+        with patch.object(PvReplyWithContacts, "handle_event", fake_base):
+            await asyncio.gather(module.handle_event(event), module.handle_event(event))
+        self.assertEqual(max_active, 1)
 
     async def test_legacy_continuation_is_quarantined(self):
-        host = _GuardHost()
-        host._install_pv_production_guards()
-        result = await host.pv.action_send_message_step(
+        module = PvReplyProduction.__new__(PvReplyProduction)
+        module.storage = _Storage()
+        result = await module.action_send_message_step(
             {"payload": {"peer": 55, "context": {}}}, None
         )
         self.assertEqual(result["reason"], "legacy_step_quarantined")
-        self.assertEqual(host.pv.original_step_calls, 0)
 
     async def test_changed_conversation_cannot_send_old_step(self):
-        host = _GuardHost()
-        host._install_pv_production_guards()
+        module = PvReplyProduction.__new__(PvReplyProduction)
+        module.storage = _Storage()
         action = {"payload": {"peer": 55, "context": {"_pv_guard": {
             "stage": "greeting_queued", "last_inbound_message_id": 10,
         }}}}
-        host.storage.pool.message_id = 11
-        result = await host.pv.action_send_message_step(action, None)
+        module.storage.pool.message_id = 11
+        result = await module.action_send_message_step(action, None)
         self.assertEqual(result["reason"], "conversation_state_changed")
-        self.assertEqual(host.pv.original_step_calls, 0)
+
+    def test_no_methodtype_or_runtime_assignment_exists_in_policy(self):
+        source = inspect.getsource(PvReplyProduction)
+        self.assertNotIn("MethodType", source)
+        self.assertNotIn("= MethodType", source)
+        self.assertNotIn("storage.accept_pv_message =", source)
 
 
 class _App:
+    settings = SimpleNamespace(pv_preview_link="https://t.me/example_preview")
+
     def is_admin(self, event):
         return True
 
@@ -150,7 +112,7 @@ class _PanelBase:
         self.rendered = text
 
 
-class _SafePanel(PvEditorSafetyMixin, _PanelBase):
+class _SafePanel(PvEditorPolicyMixin, _PanelBase):
     pass
 
 
@@ -160,7 +122,7 @@ class _Event:
         self.data = data
 
 
-class EditorSafetyTests(unittest.IsolatedAsyncioTestCase):
+class EditorPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_navigation_abandons_edit_without_mutating_copy(self):
         panel = _SafePanel()
         panel.pv_editor_pending = {"mode": "text", "step_id": 1}
@@ -182,6 +144,13 @@ class EditorSafetyTests(unittest.IsolatedAsyncioTestCase):
         await panel._handle_editor_action(event, "empty", 1)
         self.assertEqual(panel.base_actions, 0)
         self.assertTrue(panel.returned)
+
+    def test_editor_shows_resolved_preview_destination(self):
+        panel = _SafePanel()
+        self.assertEqual(
+            panel._resolved_destination("{preview_link}"),
+            "https://t.me/example_preview",
+        )
 
 
 class _AsyncNone:
