@@ -6,6 +6,7 @@ from gr_observer.priority_storage import PriorityStorage
 from gr_observer.pv_suppression import (
     PV_SUPPRESSION_SCHEMA,
     normalize_target,
+    recent_pv_users,
     suppress_pv_user,
 )
 
@@ -50,6 +51,40 @@ class PvSuppressionPolicyTests(unittest.TestCase):
         self.assertIn("suppress_pv_user", source)
         self.assertIn("usuarios_parados", source)
         self.assertIn("list_suppressed", source)
+
+    def test_empty_stop_command_opens_recent_contact_picker(self):
+        source = inspect.getsource(GroupControlPanel._handle_pv_kill_switch)
+        picker = inspect.getsource(GroupControlPanel._show_pv_stop_picker)
+        self.assertIn("_show_pv_stop_picker", source)
+        self.assertIn("recent_pv_users", picker)
+        self.assertIn("pvstop:", picker)
+        self.assertIn("Mais recentes primeiro", picker)
+
+    def test_picker_callback_uses_same_persistent_kill_switch(self):
+        source = inspect.getsource(GroupControlPanel.on_callback)
+        self.assertIn(r'pvstop:(\d+)', source)
+        self.assertIn("suppress_pv_user", source)
+        self.assertIn('reason="admin_picker"', source)
+        self.assertIn("_show_pv_stop_picker", source)
+
+    def test_recent_picker_excludes_already_suppressed_contacts(self):
+        source = inspect.getsource(recent_pv_users)
+        self.assertIn("NOT EXISTS", source)
+        self.assertIn("pv_suppressed_users", source)
+        self.assertIn("ORDER BY c.last_inbound_at DESC", source)
+
+    def test_picker_label_disambiguates_with_id_suffix(self):
+        label = GroupControlPanel._pv_stop_label(
+            {
+                "user_id": 123456789,
+                "username": "joao",
+                "display_name": "João",
+            }
+        )
+        self.assertIn("João", label)
+        self.assertIn("@joao", label)
+        self.assertTrue(label.endswith("6789"))
+        self.assertLessEqual(len(label), 60)
 
 
 if __name__ == "__main__":
