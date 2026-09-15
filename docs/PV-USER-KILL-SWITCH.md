@@ -46,3 +46,5 @@ Se uma RPC Telegram já estiver efetivamente em voo no exato instante em que o b
 A PR #36 foi consolidada em `release/pr16-production` pelo merge `3d2d912db82a565b2119d9f81911b14786a28564`.
 
 A PR #37 adicionou o seletor visual de contatos e foi consolidada pelo merge `5c3b938866fd91ee010efea5e1c767681d29f10c`.
+
+A PR #38 adicionou a sincronização do bloqueio nativo do Telegram e foi consolidada pelo merge `510fca857a78cab34e7551a3a4f4881da4f3c15e`. Este commit registra a promoção e força o source deploy auditável da release.
