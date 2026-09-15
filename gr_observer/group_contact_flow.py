@@ -198,8 +198,8 @@ class GroupContactFlow:
         """Observe one human group event; return True when P00 captured it.
 
         P00 is deliberately evaluated before the older ADD/protection paths.
-        A captured fish must not extend the bait lifetime: the bait remains owned
-        exclusively by the adaptive repost cycle.
+        When P00 mode is enabled those older contact reactions are fully dormant:
+        the bait and its capture are one product, not a third reactive product.
         """
         if not (self.capture_enabled or self.add_enabled or self.protection_enabled):
             return False
@@ -246,12 +246,15 @@ class GroupContactFlow:
             )
             return True
 
+        # P00 mode replaces, rather than stacks on top of, the old ADD and
+        # engagement-protection reactions. No active bait/capture means silence.
+        if self.capture_enabled:
+            return False
+
         engaged = reply_to_ours or mentioned
         if not engaged:
             return False
 
-        # Legacy protection remains available for non-capture contexts only.
-        # A P00 capture returned above and can never hold the active bait for 24h.
         if self.protection_enabled:
             target_message_id = None
             reason = None
