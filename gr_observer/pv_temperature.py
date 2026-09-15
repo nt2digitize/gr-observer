@@ -50,7 +50,7 @@ def classify_demand_signal(text: str) -> str:
         return "none"
     request_terms = (
         "manda", "mandar", "passa", "passar", "quero",
-        "cade", "qual", "tem", "envia", "enviar", "me da",
+        "cade", "cadê", "qual", "tem", "envia", "enviar", "me da", "me dá",
     )
     if any(term in value for term in request_terms):
         return "explicit_link_request"
