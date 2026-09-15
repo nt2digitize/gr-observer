@@ -22,20 +22,12 @@ def required(name: str) -> str:
 
 
 def csv_env(name: str) -> tuple[str, ...]:
-    return tuple(
-        item.strip() for item in os.getenv(name, "").split(",") if item.strip()
-    )
+    return tuple(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
 
 
 def env_bool(name: str, default: bool = False) -> bool:
     fallback = "1" if default else "0"
-    return os.getenv(name, fallback).strip().casefold() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-        "sim",
-    }
+    return os.getenv(name, fallback).strip().casefold() in {"1", "true", "yes", "on", "sim"}
 
 
 @dataclass(frozen=True)
@@ -66,6 +58,7 @@ class Settings:
     botson_entry_wait_seconds: float
     botson_recovery_wait_seconds: float
     botson_report_ttl_seconds: int
+    pv_minilearn_shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -77,50 +70,29 @@ class Settings:
             api_hash=required("TELEGRAM_API_HASH"),
             control_bot_token=required("CONTROL_BOT_TOKEN"),
             admin_id=int(required("ADMIN_USER_ID")),
-            database_url=required("DATABASE_URL").replace(
-                "postgres://", "postgresql://", 1
-            ),
+            database_url=required("DATABASE_URL").replace("postgres://", "postgresql://", 1),
             user_session_string=os.getenv("USER_SESSION_STRING", "").strip(),
             history_limit=max(0, min(50, int(os.getenv("HISTORY_LIMIT", "20")))),
-            scan_interval_minutes=max(
-                1, int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
-            ),
+            scan_interval_minutes=max(1, int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))),
             pv_preview_link=os.getenv("PV_PREVIEW_LINK", "").strip(),
             pv_reply_auto_enable=env_bool("PV_REPLY_AUTO_ENABLE", False),
-            pv_reply_delay_seconds=max(
-                0, int(os.getenv("PV_REPLY_DELAY_SECONDS", "60"))
-            ),
+            pv_reply_delay_seconds=max(0, int(os.getenv("PV_REPLY_DELAY_SECONDS", "60"))),
             pv_followup_min_hours=min(followup_min, followup_max),
             pv_followup_max_hours=max(followup_min, followup_max),
-            pv_followup_max_cycles=max(
-                0, min(7, int(os.getenv("PV_FOLLOWUP_MAX_CYCLES", "7")))
-            ),
-            pv_weekly_interval_hours=max(
-                24.0, float(os.getenv("PV_WEEKLY_INTERVAL_HOURS", "168"))
-            ),
-            # Kept opt-in so the established PV sequence is unchanged until
-            # the operator deliberately enables this extra branch.
+            pv_followup_max_cycles=max(0, min(7, int(os.getenv("PV_FOLLOWUP_MAX_CYCLES", "7")))),
+            pv_weekly_interval_hours=max(24.0, float(os.getenv("PV_WEEKLY_INTERVAL_HOURS", "168"))),
             pv_two_screens_enabled=env_bool("PV_TWO_SCREENS_ENABLED", False),
             botson_previews=csv_env("BOTSON_PREVIEW_ALLOWLIST"),
             botson_bot_targets=csv_env("BOTSON_BOT_TARGETS"),
-            botson_controller_id=int(controller)
-            if controller.lstrip("-").isdigit()
-            else None,
+            botson_controller_id=int(controller) if controller.lstrip("-").isdigit() else None,
             botson_pair_code=os.getenv("BOTSON_PAIR_CODE", "").strip() or None,
-            botson_trigger_text=os.getenv("BOTSON_TRIGGER_TEXT", "testar")
-            .strip()
-            .casefold(),
+            botson_trigger_text=os.getenv("BOTSON_TRIGGER_TEXT", "testar").strip().casefold(),
             botson_max_clicks=max(1, int(os.getenv("BOTSON_MAX_CLICKS", "12"))),
             botson_max_depth=max(0, int(os.getenv("BOTSON_MAX_DEPTH", "5"))),
-            botson_entry_wait_seconds=max(
-                1.0, float(os.getenv("BOTSON_ENTRY_WAIT_SECONDS", "12"))
-            ),
-            botson_recovery_wait_seconds=max(
-                1.0, float(os.getenv("BOTSON_RECOVERY_WAIT_SECONDS", "20"))
-            ),
-            botson_report_ttl_seconds=max(
-                60, int(os.getenv("BOTSON_REPORT_TTL_SECONDS", "21600"))
-            ),
+            botson_entry_wait_seconds=max(1.0, float(os.getenv("BOTSON_ENTRY_WAIT_SECONDS", "12"))),
+            botson_recovery_wait_seconds=max(1.0, float(os.getenv("BOTSON_RECOVERY_WAIT_SECONDS", "20"))),
+            botson_report_ttl_seconds=max(60, int(os.getenv("BOTSON_REPORT_TTL_SECONDS", "21600"))),
+            pv_minilearn_shadow_enabled=env_bool("PV_MINILEARN_SHADOW_ENABLED", False),
         )
 
     def module_blocker(self, module_id: str) -> str | None:
