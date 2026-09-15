@@ -23,3 +23,7 @@ Permitir ao administrador parar imediatamente a automação privada para um úni
 ## Limite físico
 
 Se uma RPC Telegram já estiver efetivamente em voo no exato instante em que o administrador aciona o kill switch, essa única chamada pode terminar. O restante da fila é neutralizado e novas ações ficam bloqueadas.
+
+## Registro de promoção
+
+A PR #36 foi consolidada em `release/pr16-production` pelo merge `3d2d912db82a565b2119d9f81911b14786a28564`. Este commit registra a promoção e força o source deploy auditável dessa release.
