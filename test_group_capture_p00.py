@@ -103,9 +103,16 @@ class GroupCaptureStructureTests(unittest.TestCase):
         self.assertIn('_flag("GROUP_CAPTURE_P00_ENABLED", False)', self.flow)
 
     def test_capture_is_bound_to_current_bait_or_explicit_mention(self):
-        self.assertIn("current_bait_id = await self._current_repost_message(chat_id)", self.flow)
+        self.assertIn("await self._current_repost_message(chat_id)", self.flow)
+        self.assertIn("if self.capture_enabled", self.flow)
         self.assertIn("replied_message_id == current_bait_id", self.flow)
         self.assertIn("direct_bait_reply or mentioned", self.flow)
+
+    def test_disabled_capture_does_not_change_legacy_bait_lookup_path(self):
+        self.assertIn(
+            "await self._current_repost_message(chat_id)\n            if self.capture_enabled\n            else None",
+            self.flow,
+        )
 
     def test_capture_mode_replaces_legacy_reactive_product(self):
         self.assertIn("if self.capture_enabled:\n            return False", self.flow)
