@@ -60,7 +60,12 @@ class MiniLearnShadowTests(unittest.IsolatedAsyncioTestCase):
         result = await memory.observe_outbound(user_id=10, message_id=30, text="hoje tá 30", has_media=False)
         self.assertFalse(result.learned)
         self.assertEqual(result.reason, "automation")
-        self.assertFalse(any("pv_minilearn_memory" in call.args[0] for call in pool.execute.await_args_list))
+        self.assertFalse(
+            any(
+                "INSERT INTO pv_minilearn_memory" in call.args[0]
+                for call in pool.execute.await_args_list
+            )
+        )
 
     async def test_unattributed_text_reply_becomes_human_example(self):
         memory, pool = self.memory()
@@ -69,7 +74,12 @@ class MiniLearnShadowTests(unittest.IsolatedAsyncioTestCase):
         result = await memory.observe_outbound(user_id=10, message_id=31, text="hoje tá 30", has_media=False)
         self.assertTrue(result.learned)
         self.assertEqual(result.reason, "human")
-        self.assertTrue(any("pv_minilearn_memory" in call.args[0] for call in pool.execute.await_args_list))
+        self.assertTrue(
+            any(
+                "INSERT INTO pv_minilearn_memory" in call.args[0]
+                for call in pool.execute.await_args_list
+            )
+        )
 
     async def test_unknown_context_does_not_learn(self):
         memory, pool = self.memory()
