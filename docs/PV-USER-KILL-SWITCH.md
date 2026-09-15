@@ -31,4 +31,6 @@ Se uma RPC Telegram já estiver efetivamente em voo no exato instante em que o a
 
 ## Registro de promoção
 
-A PR #36 foi consolidada em `release/pr16-production` pelo merge `3d2d912db82a565b2119d9f81911b14786a28564`. A extensão de seleção visual mantém o mesmo contrato de persistência e segurança do kill switch original.
+A PR #36 foi consolidada em `release/pr16-production` pelo merge `3d2d912db82a565b2119d9f81911b14786a28564`.
+
+A PR #37 adicionou o seletor visual de contatos e foi consolidada pelo merge `5c3b938866fd91ee010efea5e1c767681d29f10c`. Este commit registra a promoção e força o source deploy auditável da release com o picker móvel.
