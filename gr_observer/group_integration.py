@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import re
 
+from telethon import Button
+
 from .catalog import match_command
 from .clean_menu_panel import CleanMenuPanelMixin
 from .modules.group_reply_contacts import GroupReplyWithContacts
 from .panel import ControlPanel as BaseControlPanel
 from .pv_editor_policy import PvMessageEditorPanel
-from .pv_suppression import list_suppressed, resolve_pv_user, suppress_pv_user
+from .pv_suppression import (
+    list_suppressed,
+    recent_pv_users,
+    resolve_pv_user,
+    suppress_pv_user,
+)
 
 
 def register_group_reply(application) -> None:
@@ -33,6 +40,50 @@ class GroupControlPanel(
 ):
     """Operator panel with compact menus, group controls and PV copy editor."""
 
+    @staticmethod
+    def _pv_stop_label(row) -> str:
+        user_id = int(row["user_id"])
+        username = str(row["username"] or "").strip().lstrip("@")
+        display_name = str(row["display_name"] or "").strip()
+        if display_name and username:
+            identity = f"{display_name} @{username}"
+        elif display_name:
+            identity = display_name
+        elif username:
+            identity = f"@{username}"
+        else:
+            identity = f"ID {user_id}"
+        return f"⛔ {identity} · {str(user_id)[-4:]}"[:60]
+
+    async def _show_pv_stop_picker(self, event, *, edit: bool = False) -> None:
+        rows = await recent_pv_users(self.app.pool, limit=12)
+        if not rows:
+            text = (
+                "⛔ PARAR USUÁRIO\n\n"
+                "Não há contatos recentes disponíveis para selecionar. "
+                "Você ainda pode usar /parar_usuario <ID ou @username>."
+            )
+            buttons = None
+        else:
+            text = (
+                "⛔ PARAR USUÁRIO\n\n"
+                "Mais recentes primeiro. Toque na pessoa que deve parar. "
+                "O número final ajuda a diferenciar nomes iguais."
+            )
+            buttons = [
+                [
+                    Button.inline(
+                        self._pv_stop_label(row),
+                        f"pvstop:{int(row['user_id'])}".encode(),
+                    )
+                ]
+                for row in rows
+            ]
+        if edit:
+            await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
+        else:
+            await event.respond(text, buttons=buttons, parse_mode=None, link_preview=False)
+
     async def _handle_pv_kill_switch(self, event, raw_text: str) -> bool:
         stop_match = re.fullmatch(
             r"(?:/parar_usuario|/stop_user|parar\s+usuario)(?:\s+(.+))?",
@@ -42,14 +93,12 @@ class GroupControlPanel(
         if stop_match:
             target = (stop_match.group(1) or "").strip()
             if not target:
-                await event.respond(
-                    "Use: /parar_usuario <ID ou @username>", parse_mode=None
-                )
+                await self._show_pv_stop_picker(event)
                 return True
             user_id = await resolve_pv_user(self.app.pool, target)
             if user_id is None:
                 await event.respond(
-                    "Não achei esse usuário no histórico PV. Use o ID numérico do Telegram.",
+                    "Não achei esse usuário no histórico PV. Envie /parar_usuario sem parâmetro para escolher na lista.",
                     parse_mode=None,
                 )
                 return True
@@ -116,6 +165,21 @@ class GroupControlPanel(
             await super().on_callback(event)
             return
         data = event.data.decode("utf-8", errors="replace")
+        stop_pick = re.fullmatch(r"pvstop:(\d+)", data)
+        if stop_pick:
+            user_id = int(stop_pick.group(1))
+            neutralized = await suppress_pv_user(
+                self.app.pool,
+                user_id,
+                suppressed_by=self.app.admin_id,
+                reason="admin_picker",
+            )
+            await event.answer(
+                f"Usuário parado. {neutralized} ação(ões) pendente(s) neutralizada(s).",
+                alert=True,
+            )
+            await self._show_pv_stop_picker(event, edit=True)
+            return
         if data in {"module:group_reply:on", "module:group_reply:off"}:
             enabled = data.endswith(":on")
             result = await self.app.set_module_enabled("group_reply", enabled)
