@@ -108,6 +108,11 @@ async def suppress_pv_user(
                 user_id,
             )
             await conn.execute(
+                """UPDATE pv_two_screens_sessions SET status='stopped',updated_at=NOW()
+                   WHERE user_id=$1 AND status NOT IN ('completed','stopped')""",
+                user_id,
+            )
+            await conn.execute(
                 """INSERT INTO live_alert_subscriptions(user_id,status,responded_at)
                    VALUES($1,'unsubscribed',NOW())
                    ON CONFLICT(user_id) DO UPDATE SET status='unsubscribed',
