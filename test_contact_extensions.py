@@ -154,7 +154,7 @@ class ProtectionAttributionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProtectedRepostTests(unittest.IsolatedAsyncioTestCase):
-    async def test_repost_keeps_old_copy_when_engagement_is_protected(self):
+    async def test_repost_deletes_old_copy_even_when_engagement_is_protected(self):
         pool = SimpleNamespace(
             fetchrow=AsyncMock(return_value={"template_text": "meu texto", "current_message_id": 10,
                                              "template_version": 3, "repost_pending": True,
@@ -171,9 +171,10 @@ class ProtectedRepostTests(unittest.IsolatedAsyncioTestCase):
         result = await module.action_repost_group_text(
             {"action_key": "repost-1", "payload": {"peer": -1001, "template_version": 3}}, effects)
         self.assertTrue(result["sent"])
-        self.assertFalse(result["deleted"])
-        self.assertEqual(result["reason"], "protected_engagement")
-        effects.delete_messages.assert_not_awaited()
+        self.assertTrue(result["deleted"])
+        effects.delete_messages.assert_awaited_once_with(-1001, [10], "repost-1:delete-old")
+        module.contact_flow.is_message_protected.assert_not_awaited()
+        module.contact_flow.clear_protection.assert_awaited_once_with(-1001, 10)
         pool.execute.assert_awaited_once()
 
 
