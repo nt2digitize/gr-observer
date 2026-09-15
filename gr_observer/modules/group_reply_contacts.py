@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from telethon import functions, types
+from telethon import functions, types, utils
 
 from ..group_contact_flow import ADD_REPLY_TEXT, GroupContactFlow
 from ..human_timing import typing_seconds
@@ -44,12 +44,12 @@ class GroupReplyWithContacts(GroupReplyModule):
         )
 
     async def handle_event(self, event) -> bool:
-        """Let P00 reserve a bait response before the legacy reactive matcher.
+        """Run capture before legacy matching and keep cadence exactly once.
 
-        ``super`` still receives every event, therefore activity/cadence counting
-        remains unchanged. A captured event has already reserved its
-        ``group_reply_events`` key, so an old generic trigger cannot enqueue a
-        second reply for the same human message.
+        With P00 disabled, the established group path is unchanged. With P00
+        enabled, the bait/capture pair replaces the old generic reactive product:
+        every eligible human event still feeds adaptive activity, but only a
+        reply/mention tied to the active bait can create an automatic response.
         """
         if not (event.is_group or event.is_channel) or event.out:
             return await super().handle_event(event)
@@ -64,6 +64,10 @@ class GroupReplyWithContacts(GroupReplyModule):
             return await super().handle_event(event)
 
         await self.contact_flow.observe_event(event, sender, module_id=self.module_id)
+        if self.contact_flow.capture_enabled:
+            chat_id = int(utils.get_peer_id(entity))
+            await self._count_and_queue_repost(chat_id, int(event.id))
+            return False
         return await super().handle_event(event)
 
     async def _show_human_typing(self, effects, peer: int, text: str, key: str) -> None:
@@ -317,7 +321,7 @@ class GroupReplyWithContacts(GroupReplyModule):
             "Resposta de captura: limpa ao chegar no PV ou em até 45 min.\n"
             f"ADD legado por resposta/menção: {add_status}\n"
             f"Proteção legada de engajamento: {protection_status} "
-            f"({self.contact_flow.protection_seconds // 3600:g} h; nunca aplicada à captura P00)\n"
+            f"({self.contact_flow.protection_seconds // 3600:g} h; desativada enquanto P00 estiver ligado)\n"
             "Retenção visual da isca: no máximo uma mensagem gerenciada por grupo.\n"
             "Respostas automáticas usam digitação proporcional; os atrasos de leitura continuam duráveis."
         )
