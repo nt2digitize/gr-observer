@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .pv_suppression import ensure_schema as ensure_suppression_schema
+from .pv_suppression import is_suppressed
 from .queue_policy import (
     AGING_STEP_SECONDS,
     LANE_REPEAT_PENALTY,
@@ -36,6 +38,14 @@ class PriorityStorage(Storage):
     async def initialize(self) -> None:
         await super().initialize()
         await self.pool.execute(SCHEDULER_SCHEMA)
+        await ensure_suppression_schema(self.pool)
+
+    async def accept_pv_message(self, **kwargs) -> str:
+        """Do not advance or enqueue a PV journey while the admin kill switch is on."""
+        user_id = int(kwargs["user_id"])
+        if await is_suppressed(self.pool, user_id):
+            return "suppressed"
+        return await super().accept_pv_message(**kwargs)
 
     async def claim_next_action(self) -> dict[str, Any] | None:
         priority_sql = priority_case_sql("actions")
@@ -51,6 +61,23 @@ class PriorityStorage(Storage):
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # A stop command may race with future schedulers that already
+                # persisted work. Neutralize it without deleting audit history.
+                await conn.execute(
+                    """UPDATE outbox_actions actions SET status='succeeded',
+                         result=jsonb_build_object(
+                           'sent',FALSE,'reason','admin_suppressed',
+                           'peer',actions.payload->>'peer'
+                         ),lease_until=NULL,last_error=NULL,updated_at=NOW()
+                       WHERE actions.module_id='pv_reply'
+                         AND actions.status='pending'
+                         AND actions.payload ? 'peer'
+                         AND EXISTS(
+                           SELECT 1 FROM pv_suppressed_users suppressed
+                           WHERE suppressed.active IS TRUE
+                             AND suppressed.user_id::text=actions.payload->>'peer'
+                         )"""
+                )
                 last_lane = await conn.fetchval(
                     """SELECT last_lane_key FROM outbox_scheduler_state
                        WHERE singleton=TRUE FOR UPDATE"""
@@ -63,6 +90,15 @@ class PriorityStorage(Storage):
                           AND modules.enabled IS TRUE
                          WHERE actions.status='pending'
                            AND actions.available_at<=NOW()
+                           AND NOT (
+                             actions.module_id='pv_reply'
+                             AND actions.payload ? 'peer'
+                             AND EXISTS(
+                               SELECT 1 FROM pv_suppressed_users suppressed
+                               WHERE suppressed.active IS TRUE
+                                 AND suppressed.user_id::text=actions.payload->>'peer'
+                             )
+                           )
                          ORDER BY {score_sql},
                                   actions.available_at,
                                   actions.id
