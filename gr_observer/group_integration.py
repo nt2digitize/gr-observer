@@ -40,6 +40,33 @@ class GroupControlPanel(
 ):
     """Operator panel with compact menus, group controls and PV copy editor."""
 
+    async def show_pv_menu(self, event) -> None:
+        """Expose the existing per-user kill switch in the daily PV surface."""
+        state, reason, enabled = self._module_state("pv_reply")
+        text = (
+            "💬 ATENDIMENTO PV\n\n"
+            f"Estado: {state}\n"
+            f"Motivo: {reason}\n\n"
+            "Falas, tempos, destino, fotos e campanhas do atendimento privado.\n"
+            "O controle individual abaixo para somente a automação da pessoa; "
+            "não bloqueia no Telegram e não remove o contato da agenda."
+        )
+        buttons = [
+            [self._toggle_button("pv_reply", enabled, "Atendimento")],
+            [Button.inline("⏸ Tirar pessoa do funil", b"pvstop:picker")],
+            [Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")],
+            [
+                Button.inline("📷 Fotos duas telas", b"pv:two_screens"),
+                Button.inline("🔴 Nova live", b"live:new"),
+            ],
+            [
+                Button.inline("👤 Origens PV", b"origins"),
+                Button.inline("📝 Rascunhos", b"drafts"),
+            ],
+            [Button.inline("↩️ Início", b"home")],
+        ]
+        await self._render_menu(event, text, buttons)
+
     @staticmethod
     def _pv_stop_label(row) -> str:
         user_id = int(row["user_id"])
@@ -59,16 +86,18 @@ class GroupControlPanel(
         rows = await recent_pv_users(self.app.pool, limit=12)
         if not rows:
             text = (
-                "⛔ PARAR USUÁRIO\n\n"
+                "⛔ PARAR AUTOMAÇÃO DE UMA PESSOA\n\n"
                 "Não há contatos recentes disponíveis para selecionar. "
-                "Você ainda pode usar /parar_usuario <ID ou @username>."
+                "Você ainda pode usar /parar_usuario <ID ou @username>.\n\n"
+                "Isso não bloqueia a pessoa no Telegram e não remove o contato da agenda."
             )
-            buttons = None
+            buttons = [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
         else:
             text = (
-                "⛔ PARAR USUÁRIO\n\n"
-                "Mais recentes primeiro. Toque na pessoa que deve parar. "
-                "O número final ajuda a diferenciar nomes iguais."
+                "⛔ PARAR AUTOMAÇÃO DE UMA PESSOA\n\n"
+                "Mais recentes primeiro. Toque somente na pessoa que deve sair do funil. "
+                "O número final ajuda a diferenciar nomes iguais.\n\n"
+                "O contato continua salvo e o chat manual continua normal."
             )
             buttons = [
                 [
@@ -79,6 +108,7 @@ class GroupControlPanel(
                 ]
                 for row in rows
             ]
+            buttons.append([Button.inline("↩️ Atendimento PV", b"menu:pv")])
         if edit:
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
         else:
@@ -114,7 +144,7 @@ class GroupControlPanel(
                 f"Ações PV pendentes neutralizadas: {neutralized}\n\n"
                 "Novas mensagens desse usuário não criam mais jornada automática. "
                 "Uma RPC que já estivesse em voo no exato instante do bloqueio pode terminar; "
-                "o restante da fila fica cortado.",
+                "o restante da fila fica cortado. O contato e o chat manual permanecem intactos.",
                 parse_mode=None,
             )
             return True
@@ -165,6 +195,10 @@ class GroupControlPanel(
             await super().on_callback(event)
             return
         data = event.data.decode("utf-8", errors="replace")
+        if data == "pvstop:picker":
+            await event.answer()
+            await self._show_pv_stop_picker(event, edit=True)
+            return
         stop_pick = re.fullmatch(r"pvstop:(\d+)", data)
         if stop_pick:
             user_id = int(stop_pick.group(1))
