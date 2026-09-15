@@ -14,6 +14,7 @@ from .pv_suppression import is_suppressed
 from .queue_policy import (
     AGING_STEP_SECONDS,
     LANE_REPEAT_PENALTY,
+    P00_GROUP_CAPTURE,
     lane_expr_sql,
     priority_case_sql,
 )
@@ -54,9 +55,16 @@ class PriorityStorage(Storage):
             "GREATEST(0,FLOOR(EXTRACT(EPOCH FROM "
             f"(NOW()-actions.available_at))/{AGING_STEP_SECONDS}))::integer"
         )
-        score_sql = (
+        normal_score_sql = (
             f"GREATEST(0,({priority_sql})-LEAST(({priority_sql}),{age_steps_sql}))"
             f" + CASE WHEN ({lane_sql})=$1 THEN {LANE_REPEAT_PENALTY} ELSE 0 END"
+        )
+        # P00 is semantic, not an aging destination. Preserve it exactly in the
+        # real PostgreSQL selector and do not let the one-turn lane penalty turn
+        # a ready capture into a P0 tie. All ordinary work still ages only to P0.
+        score_sql = (
+            f"CASE WHEN ({priority_sql})={P00_GROUP_CAPTURE} "
+            f"THEN {P00_GROUP_CAPTURE} ELSE ({normal_score_sql}) END"
         )
 
         async with self.pool.acquire() as conn:
