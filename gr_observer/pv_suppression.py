@@ -70,6 +70,21 @@ async def resolve_pv_user(pool, target: str) -> int | None:
     return None if user_id is None else int(user_id)
 
 
+async def recent_pv_users(pool, limit: int = 12):
+    """Return recent PV contacts that are not already suppressed."""
+    return await pool.fetch(
+        """SELECT c.user_id,c.username,c.display_name,c.stage,c.last_inbound_at
+           FROM pv_reply_contacts c
+           WHERE NOT EXISTS(
+             SELECT 1 FROM pv_suppressed_users s
+             WHERE s.user_id=c.user_id AND s.active IS TRUE
+           )
+           ORDER BY c.last_inbound_at DESC,c.user_id DESC
+           LIMIT $1""",
+        max(1, min(int(limit), 30)),
+    )
+
+
 async def suppress_pv_user(
     pool,
     user_id: int,
