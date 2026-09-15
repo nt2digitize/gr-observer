@@ -207,7 +207,11 @@ class GroupContactFlow:
         text = event.raw_text or ""
         reply_to_ours, replied_message_id = await self._reply_context(event)
         mentioned = mentions_me(text, getattr(self.me, "username", None))
-        current_bait_id = await self._current_repost_message(chat_id)
+        current_bait_id = (
+            await self._current_repost_message(chat_id)
+            if self.capture_enabled
+            else None
+        )
 
         direct_bait_reply = bool(
             current_bait_id is not None
