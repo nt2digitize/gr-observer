@@ -15,6 +15,7 @@ from telethon.tl.functions.contacts import GetBlockedRequest
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_message_steps import POSITION_GAP
 from ..pv_suppression import suppress_pv_user
+from ..pv_temperature import PvTemperatureShadow, classify_demand_signal
 from .pv_reply_contacts import PvReplyWithContacts
 
 log = logging.getLogger("gr-observer.pv-production")
@@ -30,9 +31,18 @@ class PvReplyProduction(PvReplyWithContacts):
         super().__init__(storage, settings)
         self._accept_locks = [asyncio.Lock() for _ in range(self._LOCK_STRIPES)]
         self._native_block_handler = None
+        self.temperature_shadow = PvTemperatureShadow(storage.pool)
+        self._temperature_shadow_ready = False
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
+        try:
+            await self.temperature_shadow.ensure_schema()
+        except Exception as exc:
+            log.warning("PV temperature shadow unavailable erro=%s", type(exc).__name__)
+            self._temperature_shadow_ready = False
+        else:
+            self._temperature_shadow_ready = True
         self._native_block_handler = self._on_native_block_update
         client.add_event_handler(
             self._native_block_handler,
@@ -61,6 +71,7 @@ class PvReplyProduction(PvReplyWithContacts):
         if self.client is not None and self._native_block_handler is not None:
             self.client.remove_event_handler(self._native_block_handler)
         self._native_block_handler = None
+        self._temperature_shadow_ready = False
         await super().on_disconnect()
 
     async def _on_native_block_update(self, update) -> None:
@@ -112,11 +123,36 @@ class PvReplyProduction(PvReplyWithContacts):
             reconciled += 1
         return reconciled
 
+    async def _observe_temperature_shadow(self, event) -> None:
+        if not self._temperature_shadow_ready:
+            return
+        try:
+            decision = await self.temperature_shadow.observe(
+                event_key=self._event_key(event),
+                user_id=int(event.sender_id),
+                demand_signal=classify_demand_signal(event.raw_text or ""),
+            )
+        except Exception as exc:
+            # Shadow diagnostics must never interfere with PV business flow.
+            log.warning("PV temperature shadow skipped erro=%s", type(exc).__name__)
+            return
+        if decision is not None and (decision.vacuum_candidate or decision.band in {"hot", "warm"}):
+            log.info(
+                "PV temperature shadow peer=%s band=%s score=%s vacuum=%s reasons=%s",
+                int(event.sender_id),
+                decision.band,
+                decision.score,
+                decision.vacuum_candidate,
+                ",".join(decision.reasons),
+            )
+
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
             lock = self._accept_locks[int(event.sender_id) % self._LOCK_STRIPES]
             async with lock:
-                return await super().handle_event(event)
+                result = await super().handle_event(event)
+                await self._observe_temperature_shadow(event)
+                return result
         return await super().handle_event(event)
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
