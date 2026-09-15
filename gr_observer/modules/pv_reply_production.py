@@ -9,8 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from telethon import events, types
+from telethon.tl.functions.contacts import GetBlockedRequest
+
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_message_steps import POSITION_GAP
+from ..pv_suppression import suppress_pv_user
 from .pv_reply_contacts import PvReplyWithContacts
 
 log = logging.getLogger("gr-observer.pv-production")
@@ -20,16 +24,93 @@ class PvReplyProduction(PvReplyWithContacts):
     """Production PV rib with per-contact ordering and stale-step protection."""
 
     _LOCK_STRIPES = 256
+    _NATIVE_BLOCK_RECONCILE_LIMIT = 100
 
     def __init__(self, storage, settings):
         super().__init__(storage, settings)
         self._accept_locks = [asyncio.Lock() for _ in range(self._LOCK_STRIPES)]
+        self._native_block_handler = None
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
+        self._native_block_handler = self._on_native_block_update
+        client.add_event_handler(
+            self._native_block_handler,
+            events.Raw(types.UpdatePeerBlocked),
+        )
+        try:
+            reconciled = await self._reconcile_native_blocklist(client, int(me.id))
+        except Exception as exc:
+            # The real-time listener remains active even when this one bounded
+            # startup read fails. Never pause the USER runtime for this helper.
+            log.warning(
+                "PV native block reconciliation skipped erro=%s",
+                type(exc).__name__,
+            )
+        else:
+            if reconciled:
+                log.info(
+                    "PV native block reconciliation applied count=%s",
+                    reconciled,
+                )
         restored = await self._restore_missing_required_destinations()
         if restored:
             log.warning("PV restored missing required steps: %s", ",".join(restored))
+
+    async def on_disconnect(self) -> None:
+        if self.client is not None and self._native_block_handler is not None:
+            self.client.remove_event_handler(self._native_block_handler)
+        self._native_block_handler = None
+        await super().on_disconnect()
+
+    async def _on_native_block_update(self, update) -> None:
+        """Mirror a Telegram main-blocklist event into the internal PV kill switch."""
+        if not bool(getattr(update, "blocked", False)):
+            return
+        if bool(getattr(update, "blocked_my_stories_from", False)):
+            return
+        peer = getattr(update, "peer_id", None)
+        if not isinstance(peer, types.PeerUser):
+            return
+        user_id = int(peer.user_id)
+        neutralized = await suppress_pv_user(
+            self.storage.pool,
+            user_id,
+            suppressed_by=(int(self.me.id) if self.me is not None else None),
+            reason="telegram_native_block",
+        )
+        log.info(
+            "PV native Telegram block synchronized peer=%s neutralized=%s",
+            user_id,
+            neutralized,
+        )
+
+    async def _reconcile_native_blocklist(self, client, actor_id: int) -> int:
+        """Import the current main blocklist once so pre-deploy blocks are honored."""
+        result = await client(
+            GetBlockedRequest(
+                offset=0,
+                limit=self._NATIVE_BLOCK_RECONCILE_LIMIT,
+            )
+        )
+        reconciled = 0
+        for item in getattr(result, "blocked", ()):
+            peer = getattr(item, "peer_id", None)
+            if isinstance(peer, types.PeerUser):
+                user_id = int(peer.user_id)
+            else:
+                legacy_user_id = getattr(item, "user_id", None)
+                if legacy_user_id is None:
+                    continue
+                user_id = int(legacy_user_id)
+            await suppress_pv_user(
+                self.storage.pool,
+                user_id,
+                suppressed_by=int(actor_id),
+                reason="telegram_native_block_reconcile",
+            )
+            reconciled += 1
+        return reconciled
 
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
