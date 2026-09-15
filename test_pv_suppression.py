@@ -48,7 +48,8 @@ class PvSuppressionPolicyTests(unittest.TestCase):
         self.assertIn("/parar_usuario", source)
         self.assertIn("resolve_pv_user", source)
         self.assertIn("suppress_pv_user", source)
-        self.assertIn("/usuarios_parados", source)
+        self.assertIn("usuarios_parados", source)
+        self.assertIn("list_suppressed", source)
 
 
 if __name__ == "__main__":
