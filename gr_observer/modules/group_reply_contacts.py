@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from telethon import functions, types
+from telethon import functions, types, utils
 
-from ..group_contact_flow import GroupContactFlow
+from ..group_contact_flow import ADD_REPLY_TEXT, GroupContactFlow
 from ..human_timing import typing_seconds
 from .group_reply import GroupReplyModule
 
@@ -32,21 +32,43 @@ class GroupReplyWithContacts(GroupReplyModule):
             "cleanup_protected_group_message",
             self.action_cleanup_protected_group_message,
         )
+        writer.register(
+            self.module_id,
+            "group_capture_contact_reply",
+            self.action_group_capture_contact_reply,
+        )
+        writer.register(
+            self.module_id,
+            "group_capture_cleanup",
+            self.action_group_capture_cleanup,
+        )
 
     async def handle_event(self, event) -> bool:
-        result = await super().handle_event(event)
+        """Run capture before legacy matching and keep cadence exactly once.
+
+        With P00 disabled, the established group path is unchanged. With P00
+        enabled, the bait/capture pair replaces the old generic reactive product:
+        every eligible human event still feeds adaptive activity, but only a
+        reply/mention tied to the active bait can create an automatic response.
+        """
         if not (event.is_group or event.is_channel) or event.out:
-            return result
+            return await super().handle_event(event)
+
         entity = await event.get_chat()
         if not self._allowed(entity):
-            return result
+            return await super().handle_event(event)
         sender = await event.get_sender()
         if not sender or getattr(sender, "bot", False) or getattr(sender, "deleted", False):
-            return result
+            return await super().handle_event(event)
         if self.me is not None and int(getattr(sender, "id", 0) or 0) == int(self.me.id):
-            return result
+            return await super().handle_event(event)
+
         await self.contact_flow.observe_event(event, sender, module_id=self.module_id)
-        return result
+        if self.contact_flow.capture_enabled:
+            chat_id = int(utils.get_peer_id(entity))
+            await self._count_and_queue_repost(chat_id, int(event.id))
+            return False
+        return await super().handle_event(event)
 
     async def _show_human_typing(self, effects, peer: int, text: str, key: str) -> None:
         """Final visible typing phase; long reading waits stay in durable scheduling."""
@@ -191,6 +213,23 @@ class GroupReplyWithContacts(GroupReplyModule):
             )
         return await self.contact_flow.action_add_contact_reply(action, effects)
 
+    async def action_group_capture_contact_reply(self, action: dict, effects) -> dict:
+        if not self.contact_flow.capture_enabled:
+            return {"sent": False, "reason": "feature_disabled"}
+        payload = action["payload"]
+        username = str(payload.get("username") or "").strip().lstrip("@")
+        text = f"@{username} {ADD_REPLY_TEXT}" if username else ADD_REPLY_TEXT
+        await self._show_human_typing(
+            effects,
+            int(payload["peer"]),
+            text,
+            f"{action['action_key']}:typing",
+        )
+        return await self.contact_flow.action_capture_contact_reply(action, effects)
+
+    async def action_group_capture_cleanup(self, action: dict, effects) -> dict:
+        return await self.contact_flow.action_capture_cleanup(action, effects)
+
     async def action_cleanup_protected_group_message(self, action: dict, effects) -> dict:
         return await self.contact_flow.action_cleanup_protected_message(action, effects)
 
@@ -269,15 +308,20 @@ class GroupReplyWithContacts(GroupReplyModule):
 
     def preview(self) -> str:
         base = super().preview()
+        capture_status = "ligada" if self.contact_flow.capture_enabled else "desligada"
         add_status = "ligado" if self.contact_flow.add_enabled else "desligado"
         protection_status = (
             "ligada" if self.contact_flow.protection_enabled else "desligada"
         )
         return (
             f"{base}\n"
-            f"ADD por resposta/menção: {add_status}\n"
-            f"Proteção de engajamento: {protection_status} "
-            f"({self.contact_flow.protection_seconds // 3600:g} h; não retém a mensagem visível)\n"
-            "Retenção visual: no máximo uma mensagem gerenciada por grupo.\n"
+            f"Captura P00 da isca ativa: {capture_status}\n"
+            "Gatilho P00: reply direto à isca ativa ou @menção enquanto ela estiver ativa.\n"
+            "A captura salva antes de confirmar, responde em reply e não altera a vida da isca.\n"
+            "Resposta de captura: limpa ao chegar no PV ou em até 45 min.\n"
+            f"ADD legado por resposta/menção: {add_status}\n"
+            f"Proteção legada de engajamento: {protection_status} "
+            f"({self.contact_flow.protection_seconds // 3600:g} h; desativada enquanto P00 estiver ligado)\n"
+            "Retenção visual da isca: no máximo uma mensagem gerenciada por grupo.\n"
             "Respostas automáticas usam digitação proporcional; os atrasos de leitura continuam duráveis."
         )
