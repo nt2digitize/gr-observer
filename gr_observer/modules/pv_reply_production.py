@@ -55,16 +55,29 @@ class PvReplyProduction(PvReplyWithContacts):
             log.warning("PV MiniLearn shadow unavailable erro=%s", type(exc).__name__)
             self._response_memory_shadow_ready = False
         else:
-            self._response_memory_shadow_ready = bool(self.response_memory_shadow.enabled)
+            self._response_memory_shadow_ready = bool(
+                self.response_memory_shadow.enabled
+            )
         self._native_block_handler = self._on_native_block_update
-        client.add_event_handler(self._native_block_handler, events.Raw(types.UpdatePeerBlocked))
+        client.add_event_handler(
+            self._native_block_handler,
+            events.Raw(types.UpdatePeerBlocked),
+        )
         try:
             reconciled = await self._reconcile_native_blocklist(client, int(me.id))
         except Exception as exc:
-            log.warning("PV native block reconciliation skipped erro=%s", type(exc).__name__)
+            # The real-time listener remains active even when this one bounded
+            # startup read fails. Never pause the USER runtime for this helper.
+            log.warning(
+                "PV native block reconciliation skipped erro=%s",
+                type(exc).__name__,
+            )
         else:
             if reconciled:
-                log.info("PV native block reconciliation applied count=%s", reconciled)
+                log.info(
+                    "PV native block reconciliation applied count=%s",
+                    reconciled,
+                )
         restored = await self._restore_missing_required_destinations()
         if restored:
             log.warning("PV restored missing required steps: %s", ",".join(restored))
@@ -78,6 +91,7 @@ class PvReplyProduction(PvReplyWithContacts):
         await super().on_disconnect()
 
     async def _on_native_block_update(self, update) -> None:
+        """Mirror a Telegram main-blocklist event into the internal PV kill switch."""
         if not bool(getattr(update, "blocked", False)):
             return
         if bool(getattr(update, "blocked_my_stories_from", False)):
@@ -92,10 +106,20 @@ class PvReplyProduction(PvReplyWithContacts):
             suppressed_by=(int(self.me.id) if self.me is not None else None),
             reason="telegram_native_block",
         )
-        log.info("PV native Telegram block synchronized peer=%s neutralized=%s", user_id, neutralized)
+        log.info(
+            "PV native Telegram block synchronized peer=%s neutralized=%s",
+            user_id,
+            neutralized,
+        )
 
     async def _reconcile_native_blocklist(self, client, actor_id: int) -> int:
-        result = await client(GetBlockedRequest(offset=0, limit=self._NATIVE_BLOCK_RECONCILE_LIMIT))
+        """Import the current main blocklist once so pre-deploy blocks are honored."""
+        result = await client(
+            GetBlockedRequest(
+                offset=0,
+                limit=self._NATIVE_BLOCK_RECONCILE_LIMIT,
+            )
+        )
         reconciled = 0
         for item in getattr(result, "blocked", ()):
             peer = getattr(item, "peer_id", None)
@@ -125,16 +149,21 @@ class PvReplyProduction(PvReplyWithContacts):
                 demand_signal=classify_demand_signal(event.raw_text or ""),
             )
         except Exception as exc:
+            # Shadow diagnostics must never interfere with PV business flow.
             log.warning("PV temperature shadow skipped erro=%s", type(exc).__name__)
             return
         if decision is not None and (decision.vacuum_candidate or decision.band in {"hot", "warm"}):
             log.info(
                 "PV temperature shadow peer=%s band=%s score=%s vacuum=%s reasons=%s",
-                int(event.sender_id), decision.band, decision.score,
-                decision.vacuum_candidate, ",".join(decision.reasons),
+                int(event.sender_id),
+                decision.band,
+                decision.score,
+                decision.vacuum_candidate,
+                ",".join(decision.reasons),
             )
 
     async def _observe_response_memory_shadow(self, event) -> None:
+        """Observe MiniLearn facts without ever changing the PV business path."""
         if not getattr(self, "_response_memory_shadow_ready", False):
             return
         try:
@@ -151,8 +180,13 @@ class PvReplyProduction(PvReplyWithContacts):
                     has_media=getattr(event, "media", None) is not None,
                 )
                 if observation.learned:
-                    log.info("PV MiniLearn learned intent=%s peer=%s", observation.intent, peer)
+                    log.info(
+                        "PV MiniLearn learned intent=%s peer=%s",
+                        observation.intent,
+                        peer,
+                    )
                 return
+
             sender_id = int(getattr(event, "sender_id", 0) or 0)
             if sender_id <= 0:
                 return
@@ -162,6 +196,8 @@ class PvReplyProduction(PvReplyWithContacts):
                 text=event.raw_text or "",
             )
         except Exception as exc:
+            # Learning is strictly best-effort. Any uncertainty means no learning,
+            # never a pause, send, retry or change to the established PV journey.
             log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
 
     async def handle_event(self, event) -> bool:
@@ -177,6 +213,7 @@ class PvReplyProduction(PvReplyWithContacts):
         return result
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
+        """Restore only required rows physically deleted by old editor behavior."""
         reply_delay = max(MIN_WRITING_DELAY_SECONDS, int(self.settings.pv_reply_delay_seconds))
         rows = (
             ("link.preview", "link", POSITION_GAP * 2, "Link da prévia", "{preview_link}", 7),
@@ -184,6 +221,7 @@ class PvReplyProduction(PvReplyWithContacts):
             ("reminder.link", "reminder_link", POSITION_GAP, "Reenvio do link", "{preview_link}", reply_delay),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
+            # Destination-pair migration owns position 1; the actual destination is position 2.
             ("live.link", "live_link", POSITION_GAP * 2, "Destino", "{live_link}", MIN_WRITING_DELAY_SECONDS),
         )
         restored: list[str] = []
@@ -194,7 +232,11 @@ class PvReplyProduction(PvReplyWithContacts):
                        median_delay_seconds,variant_root,built_in,updated_at)
                    VALUES($1,$2,NULL,$3,$4,$5,'link',$6,FALSE,TRUE,NOW())
                    ON CONFLICT(step_key) DO NOTHING RETURNING step_key""",
-                step_key, block_key, position, label, content,
+                step_key,
+                block_key,
+                position,
+                label,
+                content,
                 max(MIN_WRITING_DELAY_SECONDS, int(median)),
             )
             if inserted:
@@ -212,7 +254,8 @@ class PvReplyProduction(PvReplyWithContacts):
             "stage": str(row["stage"]) if row is not None else None,
             "last_inbound_message_id": (
                 int(row["last_inbound_message_id"])
-                if row is not None and row["last_inbound_message_id"] is not None else None
+                if row is not None and row["last_inbound_message_id"] is not None
+                else None
             ),
         }
         kwargs["context"] = context
@@ -224,6 +267,7 @@ class PvReplyProduction(PvReplyWithContacts):
         guard = context.get("_pv_guard")
         if not isinstance(guard, dict):
             return {"sent": False, "reason": "legacy_step_quarantined"}
+
         peer = int(payload.get("peer") or 0)
         row = await self.storage.pool.fetchrow(
             "SELECT stage,last_inbound_message_id FROM pv_reply_contacts WHERE user_id=$1",
@@ -232,7 +276,8 @@ class PvReplyProduction(PvReplyWithContacts):
         current_stage = str(row["stage"]) if row is not None else None
         current_message_id = (
             int(row["last_inbound_message_id"])
-            if row is not None and row["last_inbound_message_id"] is not None else None
+            if row is not None and row["last_inbound_message_id"] is not None
+            else None
         )
         expected_message_id = guard.get("last_inbound_message_id")
         if expected_message_id is not None:
