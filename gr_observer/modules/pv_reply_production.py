@@ -124,7 +124,7 @@ class PvReplyProduction(PvReplyWithContacts):
         return reconciled
 
     async def _observe_temperature_shadow(self, event) -> None:
-        if not self._temperature_shadow_ready:
+        if not getattr(self, "_temperature_shadow_ready", False):
             return
         try:
             decision = await self.temperature_shadow.observe(
