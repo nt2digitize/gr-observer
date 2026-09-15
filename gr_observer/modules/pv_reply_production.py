@@ -14,6 +14,7 @@ from telethon.tl.functions.contacts import GetBlockedRequest
 
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_message_steps import POSITION_GAP
+from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
 from ..pv_temperature import PvTemperatureShadow, classify_demand_signal
 from .pv_reply_contacts import PvReplyWithContacts
@@ -33,6 +34,11 @@ class PvReplyProduction(PvReplyWithContacts):
         self._native_block_handler = None
         self.temperature_shadow = PvTemperatureShadow(storage.pool)
         self._temperature_shadow_ready = False
+        self.response_memory_shadow = PvResponseMemoryShadow(
+            storage.pool,
+            enabled=bool(getattr(settings, "pv_minilearn_shadow_enabled", False)),
+        )
+        self._response_memory_shadow_ready = False
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
@@ -43,6 +49,15 @@ class PvReplyProduction(PvReplyWithContacts):
             self._temperature_shadow_ready = False
         else:
             self._temperature_shadow_ready = True
+        try:
+            await self.response_memory_shadow.ensure_schema()
+        except Exception as exc:
+            log.warning("PV MiniLearn shadow unavailable erro=%s", type(exc).__name__)
+            self._response_memory_shadow_ready = False
+        else:
+            self._response_memory_shadow_ready = bool(
+                self.response_memory_shadow.enabled
+            )
         self._native_block_handler = self._on_native_block_update
         client.add_event_handler(
             self._native_block_handler,
@@ -72,6 +87,7 @@ class PvReplyProduction(PvReplyWithContacts):
             self.client.remove_event_handler(self._native_block_handler)
         self._native_block_handler = None
         self._temperature_shadow_ready = False
+        self._response_memory_shadow_ready = False
         await super().on_disconnect()
 
     async def _on_native_block_update(self, update) -> None:
@@ -146,14 +162,55 @@ class PvReplyProduction(PvReplyWithContacts):
                 ",".join(decision.reasons),
             )
 
+    async def _observe_response_memory_shadow(self, event) -> None:
+        """Observe MiniLearn facts without ever changing the PV business path."""
+        if not getattr(self, "_response_memory_shadow_ready", False):
+            return
+        try:
+            if not getattr(event, "is_private", False):
+                return
+            if bool(getattr(event, "out", False)):
+                peer = int(getattr(event, "chat_id", 0) or 0)
+                if peer <= 0:
+                    return
+                observation = await self.response_memory_shadow.observe_outbound(
+                    user_id=peer,
+                    message_id=int(event.id),
+                    text=event.raw_text or "",
+                    has_media=getattr(event, "media", None) is not None,
+                )
+                if observation.learned:
+                    log.info(
+                        "PV MiniLearn learned intent=%s peer=%s",
+                        observation.intent,
+                        peer,
+                    )
+                return
+
+            sender_id = int(getattr(event, "sender_id", 0) or 0)
+            if sender_id <= 0:
+                return
+            await self.response_memory_shadow.observe_inbound(
+                user_id=sender_id,
+                message_id=int(event.id),
+                text=event.raw_text or "",
+            )
+        except Exception as exc:
+            # Learning is strictly best-effort. Any uncertainty means no learning,
+            # never a pause, send, retry or change to the established PV journey.
+            log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
+
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
             lock = self._accept_locks[int(event.sender_id) % self._LOCK_STRIPES]
             async with lock:
                 result = await super().handle_event(event)
                 await self._observe_temperature_shadow(event)
+                await self._observe_response_memory_shadow(event)
                 return result
-        return await super().handle_event(event)
+        result = await super().handle_event(event)
+        await self._observe_response_memory_shadow(event)
+        return result
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""
