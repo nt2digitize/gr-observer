@@ -14,6 +14,7 @@ Permitir ao administrador parar imediatamente a automação privada para um úni
 - o bloqueio fica persistido em `pv_suppressed_users`;
 - novas mensagens do usuário suprimido não avançam a jornada PV;
 - ações PV pendentes para esse peer viram `succeeded` com resultado `admin_suppressed`, preservando o histórico;
+- sessões de duas telas passam para `stopped`;
 - campanhas de live são interrompidas para o usuário;
 - o contato passa para `stage='stopped'`;
 - nenhuma sessão, Outbox ou Writer adicional é criado;
