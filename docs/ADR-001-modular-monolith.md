@@ -57,9 +57,13 @@ preservados.
 ### Atendimento de Grupos
 
 O ato final permanece o mesmo: observar somente grupos autorizados, responder
-pedidos novos com atraso/cooldown e manter o texto manual reaparecendo após dez
-mensagens novas. A allowlist é uma fonte inicial; uma postagem manual bem-sucedida
-também pode autorizar dinamicamente o grupo e definir/substituir o modelo.
+pedidos novos com atraso/cooldown e manter o texto manual reaparecendo segundo
+uma cadência adaptativa baseada em atividade e sazonalidade. A antiga regra fixa
+de dez mensagens foi superada pela ADR-005. O ciclo atual combina atividade
+recente, histórico do mesmo dia/horário e baseline, persistindo um alvo variável
+de mensagens e um intervalo mínimo; as duas travas precisam ser satisfeitas.
+A allowlist é uma fonte inicial; uma postagem manual bem-sucedida também pode
+autorizar dinamicamente o grupo e definir/substituir o modelo.
 
 As intenções ativas permanecem na Outbox e são executadas pelo Writer único.
 O módulo não abre uma segunda `TelegramClient`.
