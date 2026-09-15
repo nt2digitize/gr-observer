@@ -156,9 +156,15 @@ grupo substitui o modelo anterior. Por isso a costela pode ser ligada mesmo com
 a allowlist vazia quando o objetivo é autorizar por postagem manual.
 
 Em cada grupo com modelo, somente mensagens novas de outras pessoas entram na
-contagem. Após dez mensagens, a função publica o texto novamente, confirma o ID
-da nova publicação e só então apaga a cópia anterior. Mensagens automáticas da
-própria conta não entram na contagem e não substituem o modelo.
+medição de atividade. A republicação não usa mais um contador fixo de dez
+mensagens. Cada ciclo calcula e persiste um plano adaptativo a partir de três
+sinais: 60% da atividade recente, 30% do histórico do mesmo dia/horário e 10%
+do baseline dos últimos sete dias. O plano define `cycle_target_messages` e
+`cycle_min_interval_seconds`; as duas travas precisam ser satisfeitas antes de
+aprovar a republicação. O alvo é limitado a 2–40 mensagens e o intervalo mínimo
+a 15 minutos–4 horas. Mensagens automáticas da própria conta não entram na
+medição e não substituem o modelo. A regra autoritativa está em
+`docs/ADR-005-cadencia-sazonal-e-arbitro-grupos.md`.
 
 Pedidos novos relacionados a esposa recebem uma das respostas curtas após
 70–90 segundos. Depois de cada resposta, o cooldown daquele grupo varia entre
@@ -309,6 +315,7 @@ Veja também:
 
 - [Arquitetura](docs/ARCHITECTURE.md)
 - [ADR da reorganização](docs/ADR-001-modular-monolith.md)
+- [ADR da cadência sazonal de grupos](docs/ADR-005-cadencia-sazonal-e-arbitro-grupos.md)
 - [ADR do Atendimento PV](docs/ADR-002-atendimento-pv.md)
 - [Inventário e lacunas](docs/FEATURE-GAP.md)
 - [Plano de ativação e rollback](docs/CUTOVER.md)

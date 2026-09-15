@@ -201,7 +201,7 @@ MODULES = {
         "order": 25,
         "dispatch_order": 25,
         "label": "Atendimento de Grupos",
-        "description": "Responde pedidos autorizados e mantém o texto manual visível após cada 10 mensagens novas.",
+        "description": "Responde pedidos autorizados e mantém o texto manual visível com cadência adaptativa por atividade e sazonalidade.",
         "initial_reason": "Desligado por padrão; configure a allowlist ou autorize por postagem manual",
         "default_enabled": False,
         "active_writes": True,
