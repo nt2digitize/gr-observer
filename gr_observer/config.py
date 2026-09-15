@@ -66,6 +66,7 @@ class Settings:
     botson_entry_wait_seconds: float
     botson_recovery_wait_seconds: float
     botson_report_ttl_seconds: int
+    pv_minilearn_shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -120,6 +121,9 @@ class Settings:
             ),
             botson_report_ttl_seconds=max(
                 60, int(os.getenv("BOTSON_REPORT_TTL_SECONDS", "21600"))
+            ),
+            pv_minilearn_shadow_enabled=env_bool(
+                "PV_MINILEARN_SHADOW_ENABLED", False
             ),
         )
 
