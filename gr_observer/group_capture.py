@@ -64,6 +64,7 @@ class GroupCaptureStore:
         last_name: str | None,
     ) -> bool:
         """Persist one fish per user/bait and queue exactly one P00 intent."""
+        event_key = f"{chat_id}:{source_message_id}"
         action_key = f"group-capture:{chat_id}:{bait_message_id}:{user_id}"
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -80,6 +81,24 @@ class GroupCaptureStore:
                 )
                 if inserted is None:
                     return False
+
+                # Persist only neutral routing facts; never the human message body.
+                await conn.execute(
+                    """INSERT INTO inbox_events(source,event_key,module_id,payload)
+                       VALUES('telegram-user',$1,$2,$3::jsonb)
+                       ON CONFLICT DO NOTHING""",
+                    event_key,
+                    module_id,
+                    _json(
+                        {
+                            "kind": "group_bait_capture",
+                            "chat_id": int(chat_id),
+                            "bait_message_id": int(bait_message_id),
+                            "source_message_id": int(source_message_id),
+                            "user_id": int(user_id),
+                        }
+                    ),
+                )
 
                 # Reserve this inbound message inside the existing group event
                 # namespace before the legacy reactive matcher runs. This blocks
@@ -125,17 +144,25 @@ class GroupCaptureStore:
         reply_message_id: int,
         ttl_seconds: int = CAPTURE_REPLY_TTL_SECONDS,
     ) -> None:
-        """Persist the exact message we own, then schedule bounded cleanup."""
+        """Persist exact own reply and schedule TTL plus any already-due PV cleanup."""
         ttl_seconds = max(60, int(ttl_seconds))
-        cleanup_key = f"group-capture-cleanup:{chat_id}:{bait_message_id}:{user_id}:ttl"
+        ttl_key = f"group-capture-cleanup:{chat_id}:{bait_message_id}:{user_id}:ttl"
+        pv_key = f"group-capture-cleanup:{chat_id}:{bait_message_id}:{user_id}:pv"
+        payload = {
+            "peer": int(chat_id),
+            "bait_message_id": int(bait_message_id),
+            "source_user_id": int(user_id),
+            "reply_message_id": int(reply_message_id),
+        }
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
+                pv_arrived_at = await conn.fetchval(
                     """UPDATE group_capture_events SET
                          status='replied',reply_message_id=$4,sent_at=NOW(),
                          cleanup_at=NOW()+($5 * INTERVAL '1 second'),
                          last_error=NULL,updated_at=NOW()
-                       WHERE chat_id=$1 AND bait_message_id=$2 AND user_id=$3""",
+                       WHERE chat_id=$1 AND bait_message_id=$2 AND user_id=$3
+                       RETURNING pv_arrived_at""",
                     int(chat_id),
                     int(bait_message_id),
                     int(user_id),
@@ -148,19 +175,23 @@ class GroupCaptureStore:
                        ) VALUES($1,$2,'group_capture_cleanup',$3::jsonb,
                                 NOW()+($4 * INTERVAL '1 second'))
                        ON CONFLICT(action_key) DO NOTHING""",
-                    cleanup_key,
+                    ttl_key,
                     module_id,
-                    _json(
-                        {
-                            "peer": int(chat_id),
-                            "bait_message_id": int(bait_message_id),
-                            "source_user_id": int(user_id),
-                            "reply_message_id": int(reply_message_id),
-                            "reason": "ttl",
-                        }
-                    ),
+                    _json({**payload, "reason": "ttl"}),
                     ttl_seconds,
                 )
+                # Close the narrow race where the user reaches PV after capture
+                # is queued but before Telegram has returned our reply message id.
+                if pv_arrived_at is not None:
+                    await conn.execute(
+                        """INSERT INTO outbox_actions(
+                               action_key,module_id,action_type,payload,available_at
+                           ) VALUES($1,$2,'group_capture_cleanup',$3::jsonb,NOW())
+                           ON CONFLICT(action_key) DO NOTHING""",
+                        pv_key,
+                        module_id,
+                        _json({**payload, "reason": "pv_arrived"}),
+                    )
 
     async def mark_error(
         self,
@@ -187,27 +218,29 @@ class GroupCaptureStore:
         module_id: str,
         user_id: int,
     ) -> int:
-        """PV arrival accelerates cleanup without deleting the human's message."""
+        """Record PV arrival even before reply id exists; clean as soon as possible."""
+        queued = 0
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 rows = await conn.fetch(
                     """UPDATE group_capture_events SET
                          pv_arrived_at=COALESCE(pv_arrived_at,NOW()),updated_at=NOW()
-                       WHERE user_id=$1 AND reply_message_id IS NOT NULL
-                         AND cleaned_at IS NULL
+                       WHERE user_id=$1 AND cleaned_at IS NULL
                        RETURNING chat_id,bait_message_id,user_id,reply_message_id""",
                     int(user_id),
                 )
                 for row in rows:
+                    if row["reply_message_id"] is None:
+                        continue
                     action_key = (
                         f"group-capture-cleanup:{int(row['chat_id'])}:"
                         f"{int(row['bait_message_id'])}:{int(row['user_id'])}:pv"
                     )
-                    await conn.execute(
+                    inserted = await conn.fetchval(
                         """INSERT INTO outbox_actions(
                                action_key,module_id,action_type,payload,available_at
                            ) VALUES($1,$2,'group_capture_cleanup',$3::jsonb,NOW())
-                           ON CONFLICT(action_key) DO NOTHING""",
+                           ON CONFLICT(action_key) DO NOTHING RETURNING id""",
                         action_key,
                         module_id,
                         _json(
@@ -220,7 +253,9 @@ class GroupCaptureStore:
                             }
                         ),
                     )
-                return len(rows)
+                    if inserted is not None:
+                        queued += 1
+                return queued
 
     async def cleanup_allowed(
         self,
