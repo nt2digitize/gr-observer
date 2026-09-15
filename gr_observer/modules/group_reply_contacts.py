@@ -64,21 +64,118 @@ class GroupReplyWithContacts(GroupReplyModule):
                 )
             )
         except Exception:
-            # Typing is cosmetic; the durable send must still proceed.
             pass
         await asyncio.sleep(seconds)
 
+    async def _current_managed_message(self, chat_id: int) -> tuple[int | None, int | None]:
+        """Return the current visible slot and template version when a loop exists."""
+        row = await self.pool.fetchrow(
+            "SELECT current_message_id,template_version FROM group_repost_state WHERE chat_id=$1",
+            chat_id,
+        )
+        if row is not None:
+            return int(row["current_message_id"]), int(row["template_version"])
+        previous = await self.pool.fetchval(
+            """SELECT outbound_message_id FROM group_reply_events
+               WHERE chat_id=$1 AND status='sent' AND outbound_message_id IS NOT NULL
+               ORDER BY sent_at DESC LIMIT 1""",
+            chat_id,
+        )
+        return (None if previous is None else int(previous)), None
+
     async def action_send_group_reply(self, action: dict, effects) -> dict:
         payload = action["payload"]
+        chat_id = int(payload["peer"])
+        source_message_id = int(payload["source_message_id"])
+        row = await self.pool.fetchrow(
+            "SELECT status FROM group_reply_events WHERE chat_id=$1 AND message_id=$2",
+            chat_id,
+            source_message_id,
+        )
+        if not row or row["status"] != "queued":
+            return {"sent": False, "reason": "state_changed"}
+        recent = await self._in_cooldown(self.pool, chat_id)
+        if recent:
+            await self.pool.execute(
+                "UPDATE group_reply_events SET status='cooldown' WHERE chat_id=$1 AND message_id=$2",
+                chat_id,
+                source_message_id,
+            )
+            return {"sent": False, "reason": "cooldown"}
+
+        old_message_id, expected_version = await self._current_managed_message(chat_id)
         text = str(payload.get("text") or "")
         if text:
             await self._show_human_typing(
                 effects,
-                int(payload["peer"]),
+                chat_id,
                 text,
                 f"{action['action_key']}:typing",
             )
-        return await super().action_send_group_reply(action, effects)
+        self._mark_automated_outbound(chat_id, text)
+        result = await effects.send_text(
+            chat_id,
+            text,
+            f"{action['action_key']}:send",
+        )
+        new_message_id = result.get("message_id")
+        if new_message_id is None:
+            raise RuntimeError("Telegram não confirmou o ID da resposta do grupo")
+        new_message_id = int(new_message_id)
+
+        if expected_version is not None:
+            current = await self.pool.fetchrow(
+                "SELECT current_message_id,template_version FROM group_repost_state WHERE chat_id=$1",
+                chat_id,
+            )
+            if (
+                current is None
+                or int(current["template_version"]) != expected_version
+                or int(current["current_message_id"]) != old_message_id
+            ):
+                await effects.delete_messages(
+                    chat_id,
+                    [new_message_id],
+                    f"{action['action_key']}:delete-stale",
+                )
+                await self.pool.execute(
+                    """UPDATE group_reply_events SET status='superseded',reply_text=$3,
+                       outbound_message_id=$4 WHERE chat_id=$1 AND message_id=$2""",
+                    chat_id,
+                    source_message_id,
+                    text,
+                    new_message_id,
+                )
+                return {"sent": False, "reason": "newer_group_message"}
+
+        if old_message_id is not None and old_message_id != new_message_id:
+            deleted = await effects.delete_messages(
+                chat_id,
+                [old_message_id],
+                f"{action['action_key']}:delete-old",
+            )
+            await self.contact_flow.clear_protection(chat_id, old_message_id)
+        else:
+            deleted = {"deleted": False, "reason": "no_previous_managed_message"}
+
+        if expected_version is not None:
+            await self.pool.execute(
+                """UPDATE group_repost_state SET current_message_id=$2,
+                   last_post_at=NOW(),updated_at=NOW()
+                   WHERE chat_id=$1 AND template_version=$3""",
+                chat_id,
+                new_message_id,
+                expected_version,
+            )
+        await self.pool.execute(
+            """UPDATE group_reply_events SET status='sent',reply_text=$3,sent_at=NOW(),
+               outbound_message_id=$4 WHERE chat_id=$1 AND message_id=$2""",
+            chat_id,
+            source_message_id,
+            text,
+            new_message_id,
+        )
+        return {"sent": True, **result, **deleted}
 
     async def action_group_add_contact_reply(self, action: dict, effects) -> dict:
         if not self.contact_flow.add_enabled:
@@ -95,8 +192,6 @@ class GroupReplyWithContacts(GroupReplyModule):
         return await self.contact_flow.action_add_contact_reply(action, effects)
 
     async def action_cleanup_protected_group_message(self, action: dict, effects) -> dict:
-        # Cleanup remains allowed after the feature is disabled so a temporary
-        # rollout cannot leave previously protected old posts behind forever.
         return await self.contact_flow.action_cleanup_protected_message(action, effects)
 
     async def action_repost_group_text(self, action: dict, effects) -> dict:
@@ -132,11 +227,14 @@ class GroupReplyWithContacts(GroupReplyModule):
             f"{action['action_key']}:typing",
         )
         sent = await effects.send_text(
-            chat_id, text, f"{action['action_key']}:send"
+            chat_id,
+            text,
+            f"{action['action_key']}:send",
         )
         new_message_id = sent.get("message_id")
         if new_message_id is None:
             raise RuntimeError("Telegram não confirmou o ID da nova publicação")
+        new_message_id = int(new_message_id)
         current_version = await self.pool.fetchval(
             "SELECT template_version FROM group_repost_state WHERE chat_id=$1",
             chat_id,
@@ -144,20 +242,17 @@ class GroupReplyWithContacts(GroupReplyModule):
         if current_version is None or int(current_version) != version:
             await effects.delete_messages(
                 chat_id,
-                [int(new_message_id)],
+                [new_message_id],
                 f"{action['action_key']}:delete-stale",
             )
             return {"sent": False, "reason": "template_changed_during_send"}
 
-        if await self.contact_flow.is_message_protected(chat_id, old_message_id):
-            deleted = {"deleted": False, "reason": "protected_engagement"}
-        else:
-            deleted = await effects.delete_messages(
-                chat_id,
-                [old_message_id],
-                f"{action['action_key']}:delete-old",
-            )
-            await self.contact_flow.clear_protection(chat_id, old_message_id)
+        deleted = await effects.delete_messages(
+            chat_id,
+            [old_message_id],
+            f"{action['action_key']}:delete-old",
+        )
+        await self.contact_flow.clear_protection(chat_id, old_message_id)
 
         await self.pool.execute(
             """UPDATE group_repost_state SET current_message_id=$2,
@@ -167,7 +262,7 @@ class GroupReplyWithContacts(GroupReplyModule):
                cycle_activity_score=NULL,updated_at=NOW()
                WHERE chat_id=$1 AND template_version=$3""",
             chat_id,
-            int(new_message_id),
+            new_message_id,
             version,
         )
         return {"sent": True, "new_message_id": new_message_id, **deleted}
@@ -182,6 +277,7 @@ class GroupReplyWithContacts(GroupReplyModule):
             f"{base}\n"
             f"ADD por resposta/menção: {add_status}\n"
             f"Proteção de engajamento: {protection_status} "
-            f"({self.contact_flow.protection_seconds // 3600:g} h)\n"
+            f"({self.contact_flow.protection_seconds // 3600:g} h; não retém a mensagem visível)\n"
+            "Retenção visual: no máximo uma mensagem gerenciada por grupo.\n"
             "Respostas automáticas usam digitação proporcional; os atrasos de leitura continuam duráveis."
         )
