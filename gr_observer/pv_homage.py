@@ -18,13 +18,14 @@ class PvHomageStore:
         self.pool = pool
 
     async def can_accept(self, user_id: int) -> bool:
-        """Accept homage only after this user actually received two-screens media."""
+        """Accept homage only soon after this user actually received two-screens media."""
         return bool(
             await self.pool.fetchval(
                 """SELECT EXISTS(
                    SELECT 1 FROM pv_two_screens_sessions s
                    WHERE s.user_id=$1
                      AND s.status IN ('awaiting_choice','completed')
+                     AND s.updated_at >= NOW()-INTERVAL '24 hours'
                      AND EXISTS(
                        SELECT 1 FROM outbox_actions a
                        WHERE a.module_id='pv_reply'
@@ -57,6 +58,7 @@ class PvHomageStore:
                     """SELECT status FROM pv_two_screens_sessions
                        WHERE user_id=$1
                          AND status IN ('awaiting_choice','completed')
+                         AND updated_at >= NOW()-INTERVAL '24 hours'
                        FOR UPDATE""",
                     int(user_id),
                 )
