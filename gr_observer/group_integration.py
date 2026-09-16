@@ -149,38 +149,92 @@ class GroupControlPanel(
         buttons = list(buttons) + [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
         await self._render_menu(event, f"{title}\n\n{description}", buttons)
 
+    async def _pv_memory_snapshot(self) -> dict:
+        """Read the existing shadow only; never enable, initialize or mutate it."""
+        try:
+            implementation = self.app.registry.get("pv_reply").implementation
+            memory = getattr(implementation, "response_memory_shadow", None)
+            if memory is None:
+                return {"enabled": False, "ready": False, "contexts": [], "responses": []}
+            return await memory.operator_snapshot(limit=8)
+        except Exception:
+            return {
+                "enabled": False,
+                "ready": False,
+                "contexts": [],
+                "responses": [],
+                "unavailable": True,
+            }
+
     async def _show_pv_conversation_info(self, event, item: str) -> None:
-        """Expose the future free-conversation surfaces without enabling behavior."""
-        items = {
-            "memory": (
-                "🧠 CONTEXTOS E MEMÓRIA",
-                "Área do listener shadow. A visualização dos contextos aprendidos entra na próxima camada; nada é enviado daqui.",
-            ),
-            "facts": (
-                "📚 BASE DE FATOS",
-                "Reservada para verdades variáveis como preço, link, evento e pagamento. Histórico de conversa nunca vira fato automaticamente.",
-            ),
-            "observed": (
-                "🗣 RESPOSTAS OBSERVADAS",
-                "Reservada para respostas humanas observadas pelo listener. Nesta camada nenhuma resposta é aprovada ou enviada.",
-            ),
-            "approved": (
-                "✅ RESPOSTAS APROVADAS",
-                "Ainda sem respostas liberadas para automação. Aprovação e envio permanecem desligados.",
-            ),
-            "listener": (
-                "👂 LISTENER",
-                "O listener é tratado como shadow: observa quando habilitado pela configuração existente, sem controlar a jornada PV.",
-            ),
-            "automation": (
-                "🤖 AUTOMAÇÃO — OFF",
-                "Resposta automática da Conversa Livre permanece desligada e não existe botão de ativação nesta fase.",
-            ),
-        }
-        title, description = items.get(
-            item,
-            ("💭 CONVERSA LIVRE", "Item não disponível nesta camada."),
-        )
+        """Expose Conversation Free as read-only shadow/operator information."""
+        if item in {"memory", "observed", "listener"}:
+            snapshot = await self._pv_memory_snapshot()
+            enabled = bool(snapshot.get("enabled"))
+            ready = bool(snapshot.get("ready"))
+            unavailable = bool(snapshot.get("unavailable"))
+            if unavailable:
+                status = "indisponível para leitura"
+            elif not enabled:
+                status = "desligado"
+            elif not ready:
+                status = "ligado em shadow, inicialização ainda não pronta"
+            else:
+                status = "ligado em shadow"
+
+            if item == "listener":
+                title = "👂 LISTENER"
+                description = (
+                    f"Status: {status}.\n\n"
+                    "Somente observa/classifica. Não existe botão de ativação aqui e o listener não controla a jornada PV."
+                )
+            elif item == "memory":
+                title = "🧠 CONTEXTOS E MEMÓRIA"
+                contexts = list(snapshot.get("contexts") or [])
+                lines = [
+                    f"• {row['intent']}: {int(row['contacts'])} contato(s) nas últimas 24 h"
+                    for row in contexts
+                ]
+                description = (
+                    f"Listener: {status}.\n\n"
+                    "Contextos classificados (sem armazenar a pergunta bruta):\n"
+                    + ("\n".join(lines) if lines else "Nenhum contexto disponível para leitura.")
+                )
+            else:
+                title = "🗣 RESPOSTAS OBSERVADAS"
+                responses = list(snapshot.get("responses") or [])
+                lines = []
+                for row in responses:
+                    text = str(row.get("response_text") or "").replace("\n", " ").strip()
+                    if len(text) > 120:
+                        text = text[:117] + "..."
+                    lines.append(
+                        f"• {row['intent']} · {int(row['times_seen'])}x — {text}"
+                    )
+                description = (
+                    f"Listener: {status}.\n\n"
+                    "Exemplos humanos observados; ainda não aprovados para automação:\n"
+                    + ("\n".join(lines) if lines else "Nenhuma resposta humana observada disponível.")
+                )
+        else:
+            items = {
+                "facts": (
+                    "📚 BASE DE FATOS",
+                    "Reservada para verdades variáveis como preço, link, evento e pagamento. Histórico de conversa nunca vira fato automaticamente.",
+                ),
+                "approved": (
+                    "✅ RESPOSTAS APROVADAS",
+                    "Ainda sem respostas liberadas para automação. Aprovação e envio permanecem desligados.",
+                ),
+                "automation": (
+                    "🤖 AUTOMAÇÃO — OFF",
+                    "Resposta automática da Conversa Livre permanece desligada e não existe botão de ativação nesta fase.",
+                ),
+            }
+            title, description = items.get(
+                item,
+                ("💭 CONVERSA LIVRE", "Item não disponível nesta camada."),
+            )
         await self._render_menu(
             event,
             f"{title}\n\n{description}",
