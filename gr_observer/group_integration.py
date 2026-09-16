@@ -84,10 +84,15 @@ class GroupControlPanel(
             ),
             "two_screens": (
                 "📸 DUAS TELAS / HOMENAGEM",
-                "Mídias e falas do ramo já existente. Nenhum estado do fluxo foi alterado.",
+                "Convite, escolha, mídias e resposta à homenagem no mesmo ramo. "
+                "Depois de uma mídia Duas Telas realmente entregue, foto/vídeo/GIF recebido no PV "
+                "é tratado como homenagem e não como nova escolha ambígua.",
                 [
-                    [Button.inline("📷 Fotos duas telas", b"pv:two_screens")],
-                    [Button.inline("✏️ Falas e tempos", b"command:pv_preview")],
+                    [Button.inline("💬 Convite", b"pvm:b:two_screens_prompt")],
+                    [Button.inline("🎯 Escolha", b"pvm:b:two_screens_preference")],
+                    [Button.inline("📷 Mídias", b"pv:two_screens")],
+                    [Button.inline("💌 Resposta à homenagem", b"pvm:b:two_screens_followup")],
+                    [Button.inline("🔁 Repetir escolha", b"pvm:b:two_screens_retry_preference")],
                 ],
             ),
             "events": (
