@@ -37,6 +37,16 @@ class PvPauseMenuTests(unittest.TestCase):
         self.assertIn('confirm_match = re.fullmatch(r"pvstop:confirm:(\\d+)"', self.integration)
         self.assertIn('pick_match = re.fullmatch(r"pvstop:pick:(\\d+)"', self.integration)
 
+    def test_confirmation_hides_id_and_exposes_clickable_contact(self):
+        self.assertIn("_pv_stop_identity", self.integration)
+        self.assertIn("Pessoa encontrada:", self.integration)
+        self.assertIn("Toque no nome para conferir o contato certo", self.integration)
+        self.assertIn('Button.url(f"👤 {label}", f"tg://user?id={int(user_id)}")', self.integration)
+        confirmation = self.integration.split("async def _show_pv_stop_confirmation", 1)[1].split(
+            "async def _show_pv_stop_picker", 1
+        )[0]
+        self.assertNotIn("Telegram user_id:", confirmation)
+
     def test_pause_can_be_preventive_by_numeric_user_id(self):
         self.assertIn("if token.isdigit():", self.suppression)
         self.assertIn("return int(token)", self.suppression)
