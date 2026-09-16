@@ -19,9 +19,10 @@ class PvPauseMenuTests(unittest.TestCase):
         )
 
     def test_daily_pv_menu_exposes_per_user_pause(self):
-        self.assertIn('Button.inline("⏸ Tirar pessoa do funil", b"pvstop:picker")', self.integration)
+        self.assertIn('Button.inline("⏸ Pausar chat de uma pessoa", b"pvstop:picker")', self.integration)
         self.assertIn('data == "pvstop:picker"', self.integration)
         self.assertIn('b"menu:pv"', self.integration)
+        self.assertIn("Nenhum outro chat é afetado", self.integration)
 
     def test_pause_is_application_only_not_telegram_block(self):
         self.assertIn("não bloqueia no Telegram", self.integration)
