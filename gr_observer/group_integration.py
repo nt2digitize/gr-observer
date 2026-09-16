@@ -195,7 +195,8 @@ class GroupControlPanel(
             f"{identity_line}\n\n"
             "Toque no nome para conferir o contato certo antes de pausar.\n\n"
             "Isso pausa somente o chat automático desta pessoa. "
-            "O contato continua salvo, o chat manual continua normal e nenhum outro chat é afetado."
+            "O contato continua salvo, o chat manual continua normal, não bloqueia no Telegram "
+            "e nenhum outro chat é afetado."
         )
         buttons = [
             [Button.url(f"👤 {label}", f"tg://user?id={int(user_id)}")],
