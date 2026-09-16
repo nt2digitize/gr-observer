@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 class PvTwoScreensHomageTests(unittest.IsolatedAsyncioTestCase):
-    async def test_homage_requires_a_succeeded_two_screens_photo(self):
+    async def test_homage_requires_a_recent_succeeded_two_screens_photo(self):
         pool = NS(fetchval=AsyncMock(return_value=True))
         store = PvHomageStore(pool)
         self.assertTrue(await store.can_accept(123))
@@ -20,6 +20,7 @@ class PvTwoScreensHomageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("a.status='succeeded'", sql)
         self.assertIn("awaiting_choice", sql)
         self.assertIn("completed", sql)
+        self.assertIn("INTERVAL '24 hours'", sql)
 
     def test_homage_persists_metadata_only_in_existing_inbox(self):
         source = (ROOT / "gr_observer" / "pv_homage.py").read_text(encoding="utf-8")
