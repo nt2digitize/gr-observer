@@ -109,8 +109,14 @@ class GroupControlPanel(
             ),
             "remarketing": (
                 "♻️ REMARKETING",
-                "Follow-ups e cadências atuais continuam intactos; apenas a navegação foi agrupada.",
-                [[Button.inline("✏️ Falas e tempos", b"command:pv_preview")]],
+                "Os ciclos continuam no scheduler e na Outbox atuais. Aqui só ficam organizadas as cadências que já existem; "
+                "nenhum agendamento novo é criado pelo menu.",
+                [
+                    [Button.inline("☀️ Diário / progressivo", b"pvm:b:followup")],
+                    [Button.inline("🔗 Reenvio de destino", b"pvm:b:reminder_link")],
+                    [Button.inline("📅 Semanal", b"pvm:b:weekly")],
+                    [Button.inline("🔴 Evento", b"pvm:b:live_remarketing")],
+                ],
             ),
             "conversation": (
                 "💭 CONVERSA LIVRE",
