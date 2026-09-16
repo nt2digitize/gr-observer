@@ -121,7 +121,7 @@ class GroupControlPanel(
             "conversation": (
                 "💭 CONVERSA LIVRE",
                 "Inteligência complementar separada dos fluxos fixos. Nesta camada a superfície é somente leitura: "
-                "não aprende fatos como verdade e não envia respostas automáticas.",
+                "não aprende fatos como verdade e nada novo responde automaticamente.",
                 [
                     [Button.inline("🧠 Contextos e Memória", b"pvconv:memory")],
                     [Button.inline("📚 Base de fatos", b"pvconv:facts")],
