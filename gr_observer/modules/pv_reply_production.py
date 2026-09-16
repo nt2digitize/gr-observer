@@ -214,7 +214,9 @@ class PvReplyProduction(PvReplyWithContacts):
 
     async def _capture_two_screens_homage(self, event) -> bool:
         """Capture a post-photo media reply without turning it into another choice."""
-        if not bool(getattr(self.settings, "pv_two_screens_enabled", False)):
+        settings = getattr(self, "settings", None)
+        homage_store = getattr(self, "homage_store", None)
+        if not bool(getattr(settings, "pv_two_screens_enabled", False)) or homage_store is None:
             return False
         media_kind = self._homage_media_kind(event)
         if media_kind is None:
@@ -223,11 +225,12 @@ class PvReplyProduction(PvReplyWithContacts):
         if not is_human_sender(sender):
             return False
         sender_id = int(sender.id)
-        if self.me is not None and sender_id == int(self.me.id):
+        me = getattr(self, "me", None)
+        if me is not None and sender_id == int(me.id):
             return False
-        if not await self.homage_store.can_accept(sender_id):
+        if not await homage_store.can_accept(sender_id):
             return False
-        recorded = await self.homage_store.record(
+        recorded = await homage_store.record(
             event_key=self._event_key(event),
             user_id=sender_id,
             message_id=int(event.id),
