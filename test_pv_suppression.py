@@ -44,34 +44,44 @@ class PvSuppressionPolicyTests(unittest.TestCase):
         self.assertIn("actions.module_id='pv_reply'", source)
         self.assertIn("FOR UPDATE OF actions SKIP LOCKED", source)
 
-    def test_admin_surface_exposes_specific_user_stop(self):
-        source = inspect.getsource(GroupControlPanel._handle_pv_kill_switch)
-        self.assertIn("/parar_usuario", source)
-        self.assertIn("resolve_pv_user", source)
-        self.assertIn("suppress_pv_user", source)
-        self.assertIn("usuarios_parados", source)
-        self.assertIn("list_suppressed", source)
+    def test_admin_surface_exposes_specific_user_stop_with_confirmation(self):
+        command = inspect.getsource(GroupControlPanel._handle_pv_kill_switch)
+        callback = inspect.getsource(GroupControlPanel.on_callback)
+        self.assertIn("/parar_usuario", command)
+        self.assertIn("resolve_pv_user", command)
+        self.assertIn("_show_pv_stop_confirmation", command)
+        self.assertIn("usuarios_parados", command)
+        self.assertIn("list_suppressed", command)
+        self.assertIn("pvstop:confirm", callback)
+        self.assertIn("suppress_pv_user", callback)
 
-    def test_empty_stop_command_opens_recent_contact_picker(self):
+    def test_empty_stop_command_opens_picker_with_preventive_options(self):
         source = inspect.getsource(GroupControlPanel._handle_pv_kill_switch)
         picker = inspect.getsource(GroupControlPanel._show_pv_stop_picker)
         self.assertIn("_show_pv_stop_picker", source)
         self.assertIn("recent_pv_users", picker)
-        self.assertIn("pvstop:", picker)
-        self.assertIn("Mais recentes primeiro", picker)
+        self.assertIn("pvstop:pick:", picker)
+        self.assertIn("pvstop:search", picker)
+        self.assertIn("pvstop:forward", picker)
+        self.assertIn("antes de ele entrar no funil", picker)
 
-    def test_picker_callback_uses_same_persistent_kill_switch(self):
-        source = inspect.getsource(GroupControlPanel.on_callback)
-        self.assertIn(r'pvstop:(\d+)', source)
-        self.assertIn("suppress_pv_user", source)
-        self.assertIn('reason="admin_picker"', source)
-        self.assertIn("_show_pv_stop_picker", source)
+    def test_picker_and_forward_require_confirmation_before_persistent_stop(self):
+        callback = inspect.getsource(GroupControlPanel.on_callback)
+        pending = inspect.getsource(GroupControlPanel._handle_pv_stop_pending_input)
+        self.assertIn(r'pvstop:pick:(\d+)', callback)
+        self.assertIn(r'pvstop:confirm:(\d+)', callback)
+        self.assertIn("_show_pv_stop_confirmation", callback)
+        self.assertIn("suppress_pv_user", callback)
+        self.assertIn("_forwarded_user_id", pending)
+        self.assertIn("ninguém foi pausado", pending)
 
-    def test_recent_picker_excludes_already_suppressed_contacts(self):
+    def test_recent_picker_includes_known_contacts_and_excludes_suppressed(self):
         source = inspect.getsource(recent_pv_users)
+        self.assertIn("contact_ledger", source)
+        self.assertIn("pv_reply_contacts", source)
         self.assertIn("NOT EXISTS", source)
         self.assertIn("pv_suppressed_users", source)
-        self.assertIn("ORDER BY c.last_inbound_at DESC", source)
+        self.assertIn("ORDER BY c.seen_at DESC", source)
 
     def test_picker_label_disambiguates_with_id_suffix(self):
         label = GroupControlPanel._pv_stop_label(
