@@ -97,10 +97,14 @@ class GroupControlPanel(
             ),
             "events": (
                 "⚡ EVENTOS",
-                "A live atual continua sendo o evento disponível. A generalização virá em camada própria.",
+                "A superfície já é organizada como evento; nesta camada o único tipo executável continua sendo live, "
+                "reutilizando o backend homologado sem criar outro motor de campanha.",
                 [
-                    [Button.inline("🔴 Nova live", b"live:new")],
-                    [Button.inline("✏️ Falas do evento", b"command:pv_preview")],
+                    [Button.inline("🔴 Criar evento / live", b"live:new")],
+                    [Button.inline("👂 Consentimento", b"pvm:b:live_optin")],
+                    [Button.inline("📣 Convite", b"pvm:b:live_invite")],
+                    [Button.inline("♻️ Remarketing do evento", b"pvm:b:live_remarketing")],
+                    [Button.inline("🔗 Mensagem + destino", b"pvm:b:live_link")],
                 ],
             ),
             "remarketing": (
