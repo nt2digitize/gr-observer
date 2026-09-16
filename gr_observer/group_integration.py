@@ -9,8 +9,9 @@ remains owned by the application spine.
 from __future__ import annotations
 
 import re
+import time
 
-from telethon import Button
+from telethon import Button, types
 
 from .catalog import match_command
 from .clean_menu_panel import CleanMenuPanelMixin
@@ -39,6 +40,8 @@ class GroupControlPanel(
     BaseControlPanel,
 ):
     """Operator panel with compact menus, group controls and PV copy editor."""
+
+    _PV_STOP_INPUT_TIMEOUT_SECONDS = 180
 
     async def show_pv_menu(self, event) -> None:
         """Expose the existing per-user kill switch in the daily PV surface."""
@@ -82,38 +85,115 @@ class GroupControlPanel(
             identity = f"ID {user_id}"
         return f"⏸ {identity} · {str(user_id)[-4:]}"[:60]
 
+    @staticmethod
+    def _forwarded_user_id(event) -> int | None:
+        """Return a trustworthy Telegram user id from a forwarded message."""
+        message = getattr(event, "message", None)
+        header = getattr(message, "fwd_from", None)
+        peer = getattr(header, "from_id", None)
+        if not isinstance(peer, types.PeerUser):
+            return None
+        user_id = int(getattr(peer, "user_id", 0) or 0)
+        return user_id if user_id > 0 else None
+
+    def _arm_pv_stop_input(self, mode: str) -> None:
+        self._pv_stop_input_mode = mode
+        self._pv_stop_input_until = time.monotonic() + self._PV_STOP_INPUT_TIMEOUT_SECONDS
+
+    def _consume_pv_stop_input_mode(self) -> str | None:
+        mode = str(getattr(self, "_pv_stop_input_mode", "") or "")
+        until = float(getattr(self, "_pv_stop_input_until", 0.0) or 0.0)
+        if not mode or time.monotonic() > until:
+            self._pv_stop_input_mode = ""
+            self._pv_stop_input_until = 0.0
+            return None
+        return mode
+
+    def _clear_pv_stop_input(self) -> None:
+        self._pv_stop_input_mode = ""
+        self._pv_stop_input_until = 0.0
+
+    async def _show_pv_stop_confirmation(self, event, user_id: int) -> None:
+        text = (
+            "⏸ CONFIRMAR PAUSA INDIVIDUAL\n\n"
+            f"Telegram user_id: {int(user_id)}\n\n"
+            "Isso pausa somente o chat automático desta pessoa. "
+            "O contato continua salvo, o chat manual continua normal e nenhum outro chat é afetado."
+        )
+        buttons = [
+            [Button.inline("✅ Pausar este chat", f"pvstop:confirm:{int(user_id)}".encode())],
+            [Button.inline("↩️ Voltar", b"pvstop:picker")],
+        ]
+        await event.respond(text, buttons=buttons, parse_mode=None, link_preview=False)
+
     async def _show_pv_stop_picker(self, event, *, edit: bool = False) -> None:
         rows = await recent_pv_users(self.app.pool, limit=12)
-        if not rows:
-            text = (
-                "⏸ PAUSAR CHAT AUTOMÁTICO DE UMA PESSOA\n\n"
-                "Não há contatos recentes disponíveis para selecionar. "
-                "Você ainda pode usar /parar_usuario <ID ou @username>.\n\n"
-                "Isso pausa somente a automação daquele chat. Não bloqueia a pessoa no Telegram, "
-                "não remove o contato da agenda e não afeta os outros chats."
-            )
-            buttons = [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
-        else:
-            text = (
-                "⏸ PAUSAR CHAT AUTOMÁTICO DE UMA PESSOA\n\n"
-                "Mais recentes primeiro. Toque somente na pessoa cujo chat automático deve ser pausado. "
-                "O número final ajuda a diferenciar nomes iguais.\n\n"
-                "O contato continua salvo, o chat manual continua normal e os outros chats não são afetados."
-            )
-            buttons = [
+        text = (
+            "⏸ PAUSAR CHAT AUTOMÁTICO DE UMA PESSOA\n\n"
+            "Você pode escolher uma pessoa conhecida, buscar por @username/ID ou encaminhar uma mensagem dela. "
+            "A pausa vale somente para aquele usuário e pode ser aplicada antes de ele entrar no funil.\n\n"
+            "Se a origem do encaminhamento estiver oculta pelo Telegram, ninguém será pausado."
+        )
+        buttons = [
+            [
+                Button.inline("🔎 Buscar por @ ou ID", b"pvstop:search"),
+                Button.inline("📩 Encaminhar mensagem", b"pvstop:forward"),
+            ]
+        ]
+        buttons.extend(
+            [
                 [
                     Button.inline(
                         self._pv_stop_label(row),
-                        f"pvstop:{int(row['user_id'])}".encode(),
+                        f"pvstop:pick:{int(row['user_id'])}".encode(),
                     )
                 ]
                 for row in rows
             ]
-            buttons.append([Button.inline("↩️ Atendimento PV", b"menu:pv")])
+        )
+        buttons.append([Button.inline("↩️ Atendimento PV", b"menu:pv")])
         if edit:
             await event.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
         else:
             await event.respond(text, buttons=buttons, parse_mode=None, link_preview=False)
+
+    async def _handle_pv_stop_pending_input(self, event, raw_text: str) -> bool:
+        mode = self._consume_pv_stop_input_mode()
+        if mode is None:
+            return False
+
+        if mode == "forward":
+            message = getattr(event, "message", None)
+            if getattr(message, "fwd_from", None) is None:
+                return False
+            self._clear_pv_stop_input()
+            user_id = self._forwarded_user_id(event)
+            if user_id is None:
+                await event.respond(
+                    "Não consegui identificar a pessoa nesse encaminhamento. "
+                    "O Telegram ocultou a origem; ninguém foi pausado.",
+                    buttons=[[Button.inline("↩️ Tentar novamente", b"pvstop:picker")]],
+                    parse_mode=None,
+                )
+                return True
+            await self._show_pv_stop_confirmation(event, user_id)
+            return True
+
+        if mode == "search" and raw_text:
+            self._clear_pv_stop_input()
+            user_id = await resolve_pv_user(self.app.pool, raw_text)
+            if user_id is None:
+                await event.respond(
+                    "Não achei esse @username no histórico conhecido. "
+                    "Use o ID numérico ou encaminhe uma mensagem da pessoa.",
+                    buttons=[[Button.inline("📩 Encaminhar mensagem", b"pvstop:forward")]],
+                    parse_mode=None,
+                )
+                return True
+            await self._show_pv_stop_confirmation(event, user_id)
+            return True
+
+        return False
 
     async def _handle_pv_kill_switch(self, event, raw_text: str) -> bool:
         stop_match = re.fullmatch(
@@ -129,26 +209,11 @@ class GroupControlPanel(
             user_id = await resolve_pv_user(self.app.pool, target)
             if user_id is None:
                 await event.respond(
-                    "Não achei esse usuário no histórico PV. Envie /parar_usuario sem parâmetro para escolher na lista.",
+                    "Não achei esse @username no histórico conhecido. Use o ID numérico ou encaminhe uma mensagem da pessoa.",
                     parse_mode=None,
                 )
                 return True
-            neutralized = await suppress_pv_user(
-                self.app.pool,
-                user_id,
-                suppressed_by=self.app.admin_id,
-                reason="admin_panel",
-            )
-            await event.respond(
-                "⏸ CHAT AUTOMÁTICO PAUSADO\n\n"
-                f"Telegram user_id: {user_id}\n"
-                f"Ações PV pendentes neutralizadas: {neutralized}\n\n"
-                "Novas mensagens desse usuário não criam mais jornada automática. "
-                "Uma RPC que já estivesse em voo no exato instante da pausa pode terminar; "
-                "o restante da fila fica cortado. O contato e o chat manual permanecem intactos. "
-                "Nenhum outro chat é afetado.",
-                parse_mode=None,
-            )
+            await self._show_pv_stop_confirmation(event, user_id)
             return True
 
         if re.fullmatch(r"/(?:usuarios_parados|parados)", raw_text, flags=re.I):
@@ -170,6 +235,8 @@ class GroupControlPanel(
         if not self.app.is_admin(event):
             return
         raw_text = (event.raw_text or "").strip()
+        if await self._handle_pv_stop_pending_input(event, raw_text):
+            return
         if await self._handle_pv_kill_switch(event, raw_text):
             return
         command_id = match_command(raw_text, "panel")
@@ -198,17 +265,45 @@ class GroupControlPanel(
             return
         data = event.data.decode("utf-8", errors="replace")
         if data == "pvstop:picker":
+            self._clear_pv_stop_input()
             await event.answer()
             await self._show_pv_stop_picker(event, edit=True)
             return
-        stop_pick = re.fullmatch(r"pvstop:(\d+)", data)
-        if stop_pick:
-            user_id = int(stop_pick.group(1))
+        if data == "pvstop:search":
+            self._arm_pv_stop_input("search")
+            await event.answer()
+            await event.edit(
+                "🔎 BUSCAR USUÁRIO\n\nEnvie agora o @username ou o ID numérico. "
+                "Se não souber, volte e use Encaminhar mensagem.",
+                buttons=[[Button.inline("↩️ Voltar", b"pvstop:picker")]],
+                parse_mode=None,
+                link_preview=False,
+            )
+            return
+        if data == "pvstop:forward":
+            self._arm_pv_stop_input("forward")
+            await event.answer()
+            await event.edit(
+                "📩 IDENTIFICAR POR ENCAMINHAMENTO\n\nEncaminhe agora uma mensagem da pessoa. "
+                "O Radar lê o user_id imediatamente; depois a mensagem original pode ser apagada sem desfazer a pausa.",
+                buttons=[[Button.inline("↩️ Voltar", b"pvstop:picker")]],
+                parse_mode=None,
+                link_preview=False,
+            )
+            return
+        pick_match = re.fullmatch(r"pvstop:pick:(\d+)", data)
+        if pick_match:
+            await event.answer()
+            await self._show_pv_stop_confirmation(event, int(pick_match.group(1)))
+            return
+        confirm_match = re.fullmatch(r"pvstop:confirm:(\d+)", data)
+        if confirm_match:
+            user_id = int(confirm_match.group(1))
             neutralized = await suppress_pv_user(
                 self.app.pool,
                 user_id,
                 suppressed_by=self.app.admin_id,
-                reason="admin_picker",
+                reason="admin_panel",
             )
             await event.answer(
                 f"Chat automático pausado. {neutralized} ação(ões) pendente(s) neutralizada(s).",
