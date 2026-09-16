@@ -75,8 +75,12 @@ class GroupControlPanel(
         sections = {
             "entry": (
                 "👋 ENTRADA",
-                "Saudação, primeiro acesso/link e pós-link. Nesta camada, a edição continua no editor existente.",
-                [[Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")]],
+                "Saudação, primeiro acesso/link e pós-link, usando exatamente os blocos atuais.",
+                [
+                    [Button.inline("👋 Saudação", b"pvm:b:greeting")],
+                    [Button.inline("🔗 Primeiro acesso / link", b"pvm:b:link")],
+                    [Button.inline("💬 Pós-link", b"pvm:b:followup")],
+                ],
             ),
             "two_screens": (
                 "📸 DUAS TELAS / HOMENAGEM",
