@@ -133,3 +133,53 @@ class PvResponseMemoryShadow:
             intent, normalized, text.strip(),
         )
         return MiniLearnObservation(intent, normalized, True, "human")
+
+    async def operator_snapshot(self, *, limit: int = 8) -> dict:
+        """Return a bounded read-only view for the admin panel.
+
+        The panel never enables the listener, creates schema, changes memory, approves
+        a response or queues Telegram work. If the shadow is not already ready, it
+        fails closed and reports status only.
+        """
+        if not self.enabled:
+            return {"enabled": False, "ready": False, "contexts": [], "responses": []}
+        if not self._ready:
+            return {"enabled": True, "ready": False, "contexts": [], "responses": []}
+        bounded = max(1, min(20, int(limit)))
+        context_rows = await self.pool.fetch(
+            """SELECT intent,COUNT(*)::BIGINT AS contacts,MAX(observed_at) AS last_seen
+               FROM pv_minilearn_context
+               WHERE observed_at > NOW()-INTERVAL '24 hours'
+               GROUP BY intent
+               ORDER BY contacts DESC,last_seen DESC,intent"""
+        )
+        response_rows = await self.pool.fetch(
+            """SELECT intent,response_text,times_seen,last_seen_at
+               FROM pv_minilearn_memory
+               ORDER BY times_seen DESC,last_seen_at DESC,intent
+               LIMIT $1""",
+            bounded,
+        )
+        contexts = [
+            {
+                "intent": str(row["intent"]),
+                "contacts": int(row["contacts"] or 0),
+                "last_seen": row["last_seen"],
+            }
+            for row in context_rows
+        ]
+        responses = [
+            {
+                "intent": str(row["intent"]),
+                "response_text": str(row["response_text"] or ""),
+                "times_seen": int(row["times_seen"] or 0),
+                "last_seen": row["last_seen_at"],
+            }
+            for row in response_rows
+        ]
+        return {
+            "enabled": True,
+            "ready": True,
+            "contexts": contexts,
+            "responses": responses,
+        }
