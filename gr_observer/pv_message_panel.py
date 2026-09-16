@@ -561,6 +561,25 @@ class PvMessageEditorPanelMixin:
         roots = [row for row in rows if bool(row["variant_root"])]
         return roots if roots else rows
 
+    @staticmethod
+    def _display_content(row) -> str:
+        content = " ".join(str(row["content"] or "").split())
+        media_kind = ""
+        try:
+            media_kind = str(row["media_kind"] or "").strip().lower()
+        except (KeyError, TypeError):
+            media_kind = ""
+        media_label = {
+            "photo": "📷 Foto",
+            "video": "🎬 Vídeo",
+            "gif": "🎞 GIF",
+        }.get(media_kind, "")
+        if media_label and content:
+            return f"{media_label} · {content}"
+        if media_label:
+            return media_label
+        return content
+
     async def show_phase_index(self, event, page: int = 0) -> None:
         rows = await self._message_store().list_all()
         present = {str(row["block_key"]) for row in rows}
@@ -646,7 +665,7 @@ class PvMessageEditorPanelMixin:
             "Escolha uma fala:",
         ]
         for index, row in enumerate(choices, start=1):
-            content = " ".join(str(row["content"]).split())
+            content = self._display_content(row)
             if len(content) > 105:
                 content = content[:102] + "..."
             marker = "✅" if int(row["id"]) == selected_id else "○"
@@ -671,7 +690,7 @@ class PvMessageEditorPanelMixin:
             "",
             "────────────",
             f"✅ FALA SELECIONADA — {selected_index} de {len(choices)}",
-            f"“{str(selected['content']).strip()}”",
+            f"“{self._display_content(selected)}”",
             "",
             "🎯 Intenção desta fala",
             intent,
@@ -745,7 +764,7 @@ class PvMessageEditorPanelMixin:
         ]
         for index, row in enumerate(rows, start=1):
             marker = "✅" if int(row["id"]) == selected_id else "○"
-            content = " ".join(str(row["content"]).split())
+            content = self._display_content(row)
             if len(content) > 100:
                 content = content[:97] + "..."
             lines.append(f"{marker} {index}. {content}")
@@ -753,7 +772,7 @@ class PvMessageEditorPanelMixin:
             "",
             "────────────",
             f"✅ FALA SELECIONADA — {next(i for i, r in enumerate(rows, 1) if int(r['id']) == selected_id)} de {len(rows)}",
-            f"“{str(selected['content']).strip()}”",
+            f"“{self._display_content(selected)}”",
             "",
             "🎯 Intenção desta fala",
             intent,
