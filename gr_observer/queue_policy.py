@@ -10,10 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# P00 is reserved for a human just captured from the active group bait. It is
-# intentionally above live PV work, but only among actions that are already
-# eligible. available_at, pacing, TrafficGovernor and FloodWait remain sovereign.
-P00_GROUP_CAPTURE = -1
 P0_LIVE_HUMAN = 0
 P1_HUMAN_REACTIVE = 1
 P2_NORMAL = 2
@@ -33,8 +29,6 @@ HUMAN_ORIGIN_PREFIXES: dict[tuple[str, str], str] = {
 }
 
 ACTION_PRIORITY: dict[tuple[str, str], int] = {
-    # A human has just engaged the active bait in an authorized group.
-    ("group_reply", "group_capture_contact_reply"): P00_GROUP_CAPTURE,
     # A human is actively waiting in PV by definition of the action.
     ("pv_reply", "send_greeting"): P0_LIVE_HUMAN,
     ("pv_reply", "send_link"): P0_LIVE_HUMAN,
@@ -62,7 +56,6 @@ ACTION_PRIORITY: dict[tuple[str, str], int] = {
     # Housekeeping and visibility maintenance.
     ("group_reply", "repost_group_text"): P4_BACKGROUND,
     ("group_reply", "cleanup_protected_group_message"): P4_BACKGROUND,
-    ("group_reply", "group_capture_cleanup"): P4_BACKGROUND,
     ("pv_reply", "close_live_recipient"): P4_BACKGROUND,
 }
 
@@ -107,20 +100,13 @@ def effective_priority(
     action_key: str = "",
     origin_age_seconds: float = 0.0,
 ) -> int:
-    """Age normal ready work upward without manufacturing P00 captures.
-
-    P00 is a semantic class, not an aging destination. A real P00 also ignores
-    the one-turn lane penalty: the capture must stay above PV P0 once it is
-    ready, while still sharing the same serial Writer and global traffic gates.
-    """
+    """Age ready work upward and discourage one lane from monopolizing turns."""
     base = base_priority(
         module_id,
         action_type,
         action_key=action_key,
         origin_age_seconds=origin_age_seconds,
     )
-    if base == P00_GROUP_CAPTURE:
-        return P00_GROUP_CAPTURE
     age_steps = max(0, int(wait_seconds // AGING_STEP_SECONDS))
     aged = max(P0_LIVE_HUMAN, base - min(base, age_steps))
     repeat_penalty = LANE_REPEAT_PENALTY if last_lane and lane == last_lane else 0

@@ -12,7 +12,6 @@ import logging
 from telethon import events, types
 from telethon.tl.functions.contacts import GetBlockedRequest
 
-from ..group_capture import GroupCaptureStore
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
@@ -40,20 +39,9 @@ class PvReplyProduction(PvReplyWithContacts):
             enabled=bool(getattr(settings, "pv_minilearn_shadow_enabled", False)),
         )
         self._response_memory_shadow_ready = False
-        self.group_capture_store = GroupCaptureStore(storage.pool)
-        self._group_capture_store_ready = False
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
-        try:
-            await self.group_capture_store.ensure_schema()
-        except Exception as exc:
-            # Group cleanup is optional to the PV journey. Its schema/runtime
-            # must never prevent normal private-chat service from connecting.
-            log.warning("Group capture cleanup unavailable erro=%s", type(exc).__name__)
-            self._group_capture_store_ready = False
-        else:
-            self._group_capture_store_ready = True
         try:
             await self.temperature_shadow.ensure_schema()
         except Exception as exc:
@@ -100,7 +88,6 @@ class PvReplyProduction(PvReplyWithContacts):
         self._native_block_handler = None
         self._temperature_shadow_ready = False
         self._response_memory_shadow_ready = False
-        self._group_capture_store_ready = False
         await super().on_disconnect()
 
     async def _on_native_block_update(self, update) -> None:
@@ -213,33 +200,11 @@ class PvReplyProduction(PvReplyWithContacts):
             # never a pause, send, retry or change to the established PV journey.
             log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
 
-    async def _queue_group_capture_cleanup_on_pv(self, user_id: int) -> None:
-        """Record conversion to PV and request cleanup through group_reply Outbox."""
-        if not getattr(self, "_group_capture_store_ready", False):
-            return
-        try:
-            queued = await self.group_capture_store.queue_private_arrival_cleanup(
-                module_id="group_reply",
-                user_id=int(user_id),
-            )
-        except Exception as exc:
-            # A cleanup bookkeeping problem must never block or alter the PV
-            # conversation. The 45-minute fallback remains independently queued.
-            log.warning(
-                "Group capture PV cleanup queue skipped peer=%s erro=%s",
-                int(user_id),
-                type(exc).__name__,
-            )
-            return
-        if queued:
-            log.info("Group capture converted to PV peer=%s open=%s", int(user_id), queued)
-
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
             lock = self._accept_locks[int(event.sender_id) % self._LOCK_STRIPES]
             async with lock:
                 result = await super().handle_event(event)
-                await self._queue_group_capture_cleanup_on_pv(int(event.sender_id))
                 await self._observe_temperature_shadow(event)
                 await self._observe_response_memory_shadow(event)
                 return result
