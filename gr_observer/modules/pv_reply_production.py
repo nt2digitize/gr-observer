@@ -14,10 +14,12 @@ from telethon.tl.functions.contacts import GetBlockedRequest
 
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
+from ..pv_homage import PvHomageStore
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
 from ..pv_temperature import PvTemperatureShadow, classify_demand_signal
+from .pv_reply import display_name, is_human_sender
 from .pv_reply_contacts import PvReplyWithContacts
 
 log = logging.getLogger("gr-observer.pv-production")
@@ -33,6 +35,7 @@ class PvReplyProduction(PvReplyWithContacts):
         super().__init__(storage, settings)
         self._accept_locks = [asyncio.Lock() for _ in range(self._LOCK_STRIPES)]
         self._native_block_handler = None
+        self.homage_store = PvHomageStore(storage.pool)
         self.temperature_shadow = PvTemperatureShadow(storage.pool)
         self._temperature_shadow_ready = False
         self.response_memory_shadow = PvResponseMemoryShadow(
@@ -67,8 +70,6 @@ class PvReplyProduction(PvReplyWithContacts):
         try:
             reconciled = await self._reconcile_native_blocklist(client, int(me.id))
         except Exception as exc:
-            # The real-time listener remains active even when this one bounded
-            # startup read fails. Never pause the USER runtime for this helper.
             log.warning(
                 "PV native block reconciliation skipped erro=%s",
                 type(exc).__name__,
@@ -150,7 +151,6 @@ class PvReplyProduction(PvReplyWithContacts):
                 demand_signal=classify_demand_signal(event.raw_text or ""),
             )
         except Exception as exc:
-            # Shadow diagnostics must never interfere with PV business flow.
             log.warning("PV temperature shadow skipped erro=%s", type(exc).__name__)
             return
         if decision is not None and (decision.vacuum_candidate or decision.band in {"hot", "warm"}):
@@ -197,14 +197,69 @@ class PvReplyProduction(PvReplyWithContacts):
                 text=event.raw_text or "",
             )
         except Exception as exc:
-            # Learning is strictly best-effort. Any uncertainty means no learning,
-            # never a pause, send, retry or change to the established PV journey.
             log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
+
+    @staticmethod
+    def _homage_media_kind(event) -> str | None:
+        message = getattr(event, "message", None)
+        if message is None:
+            return None
+        if bool(getattr(message, "gif", False)):
+            return "gif"
+        if bool(getattr(message, "video", False)):
+            return "video"
+        if getattr(message, "photo", None) is not None:
+            return "photo"
+        return None
+
+    async def _capture_two_screens_homage(self, event) -> bool:
+        """Capture a post-photo media reply without turning it into another choice."""
+        if not bool(getattr(self.settings, "pv_two_screens_enabled", False)):
+            return False
+        media_kind = self._homage_media_kind(event)
+        if media_kind is None:
+            return False
+        sender = await event.get_sender()
+        if not is_human_sender(sender):
+            return False
+        sender_id = int(sender.id)
+        if self.me is not None and sender_id == int(self.me.id):
+            return False
+        if not await self.homage_store.can_accept(sender_id):
+            return False
+        recorded = await self.homage_store.record(
+            event_key=self._event_key(event),
+            user_id=sender_id,
+            message_id=int(event.id),
+            media_kind=media_kind,
+            username=getattr(sender, "username", None),
+            display_name=display_name(sender),
+        )
+        if not recorded:
+            return False
+        origin_key = f"pv_reply:two-screens:homage:{sender_id}:{int(event.id)}"
+        prewait = await self._next_block_wait("two_screens_followup", origin_key)
+        await self._queue_sequence_continuation(
+            peer=sender_id,
+            origin_key=origin_key,
+            block_key="two_screens_followup",
+            branch_key=None,
+            after_position="0",
+            continuation="none",
+            context={"peer": sender_id},
+            variables={},
+            prewait=prewait,
+        )
+        return True
 
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
             lock = self._accept_locks[int(event.sender_id) % self._LOCK_STRIPES]
             async with lock:
+                if await self._capture_two_screens_homage(event):
+                    await self._observe_temperature_shadow(event)
+                    await self._observe_response_memory_shadow(event)
+                    return False
                 result = await super().handle_event(event)
                 await self._observe_temperature_shadow(event)
                 await self._observe_response_memory_shadow(event)
@@ -258,7 +313,6 @@ class PvReplyProduction(PvReplyWithContacts):
             ("reminder.link", "reminder_link", POSITION_GAP, "Reenvio do link", "{preview_link}", reply_delay),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
-            # Destination-pair migration owns position 1; the actual destination is position 2.
             ("live.link", "live_link", POSITION_GAP * 2, "Destino", "{live_link}", MIN_WRITING_DELAY_SECONDS),
         )
         restored: list[str] = []
