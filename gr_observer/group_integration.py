@@ -120,10 +120,19 @@ class GroupControlPanel(
             ),
             "conversation": (
                 "💭 CONVERSA LIVRE",
-                "Área reservada para Contextos e Memória, fatos e respostas observadas. Nesta camada nada novo responde automaticamente.",
+                "Inteligência complementar separada dos fluxos fixos. Nesta camada a superfície é somente leitura: "
+                "não aprende fatos como verdade e não envia respostas automáticas.",
                 [
-                    [Button.inline("👤 Origens PV", b"origins")],
-                    [Button.inline("📝 Rascunhos", b"drafts")],
+                    [Button.inline("🧠 Contextos e Memória", b"pvconv:memory")],
+                    [Button.inline("📚 Base de fatos", b"pvconv:facts")],
+                    [Button.inline("🗣 Respostas observadas", b"pvconv:observed")],
+                    [Button.inline("✅ Respostas aprovadas", b"pvconv:approved")],
+                    [Button.inline("👂 Listener", b"pvconv:listener")],
+                    [Button.inline("🤖 Automação — OFF", b"pvconv:automation")],
+                    [
+                        Button.inline("👤 Origens PV", b"origins"),
+                        Button.inline("📝 Rascunhos", b"drafts"),
+                    ],
                 ],
             ),
             "config": (
@@ -139,6 +148,44 @@ class GroupControlPanel(
         title, description, buttons = selected
         buttons = list(buttons) + [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
         await self._render_menu(event, f"{title}\n\n{description}", buttons)
+
+    async def _show_pv_conversation_info(self, event, item: str) -> None:
+        """Expose the future free-conversation surfaces without enabling behavior."""
+        items = {
+            "memory": (
+                "🧠 CONTEXTOS E MEMÓRIA",
+                "Área do listener shadow. A visualização dos contextos aprendidos entra na próxima camada; nada é enviado daqui.",
+            ),
+            "facts": (
+                "📚 BASE DE FATOS",
+                "Reservada para verdades variáveis como preço, link, evento e pagamento. Histórico de conversa nunca vira fato automaticamente.",
+            ),
+            "observed": (
+                "🗣 RESPOSTAS OBSERVADAS",
+                "Reservada para respostas humanas observadas pelo listener. Nesta camada nenhuma resposta é aprovada ou enviada.",
+            ),
+            "approved": (
+                "✅ RESPOSTAS APROVADAS",
+                "Ainda sem respostas liberadas para automação. Aprovação e envio permanecem desligados.",
+            ),
+            "listener": (
+                "👂 LISTENER",
+                "O listener é tratado como shadow: observa quando habilitado pela configuração existente, sem controlar a jornada PV.",
+            ),
+            "automation": (
+                "🤖 AUTOMAÇÃO — OFF",
+                "Resposta automática da Conversa Livre permanece desligada e não existe botão de ativação nesta fase.",
+            ),
+        }
+        title, description = items.get(
+            item,
+            ("💭 CONVERSA LIVRE", "Item não disponível nesta camada."),
+        )
+        await self._render_menu(
+            event,
+            f"{title}\n\n{description}",
+            [[Button.inline("↩️ Conversa livre", b"pvmenu:conversation")]],
+        )
 
     @staticmethod
     def _pv_stop_label(row) -> str:
@@ -368,6 +415,13 @@ class GroupControlPanel(
         if section_match:
             await event.answer()
             await self._show_pv_section_menu(event, section_match.group(1))
+            return
+        conversation_match = re.fullmatch(
+            r"pvconv:(memory|facts|observed|approved|listener|automation)", data
+        )
+        if conversation_match:
+            await event.answer()
+            await self._show_pv_conversation_info(event, conversation_match.group(1))
             return
         if data == "pvstop:picker":
             self._clear_pv_stop_input()
