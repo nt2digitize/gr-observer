@@ -71,15 +71,30 @@ async def resolve_pv_user(pool, target: str) -> int | None:
 
 
 async def recent_pv_users(pool, limit: int = 12):
-    """Return recent PV contacts that are not already suppressed."""
+    """Return recent known people not already suppressed.
+
+    Candidates include existing PV conversations and people already known by the
+    contact ledger, allowing the operator to pause automation before a person ever
+    enters the PV funnel.
+    """
     return await pool.fetch(
-        """SELECT c.user_id,c.username,c.display_name,c.stage,c.last_inbound_at
-           FROM pv_reply_contacts c
+        """WITH candidates AS (
+             SELECT c.user_id,c.username,c.display_name,c.stage,c.last_inbound_at AS seen_at
+             FROM pv_reply_contacts c
+             UNION ALL
+             SELECT l.user_id,l.username,l.display_name,'known'::TEXT AS stage,l.last_seen_at AS seen_at
+             FROM contact_ledger l
+             WHERE NOT EXISTS(
+               SELECT 1 FROM pv_reply_contacts p WHERE p.user_id=l.user_id
+             )
+           )
+           SELECT c.user_id,c.username,c.display_name,c.stage,c.seen_at AS last_inbound_at
+           FROM candidates c
            WHERE NOT EXISTS(
              SELECT 1 FROM pv_suppressed_users s
              WHERE s.user_id=c.user_id AND s.active IS TRUE
            )
-           ORDER BY c.last_inbound_at DESC,c.user_id DESC
+           ORDER BY c.seen_at DESC NULLS LAST,c.user_id DESC
            LIMIT $1""",
         max(1, min(int(limit), 30)),
     )
@@ -91,6 +106,7 @@ async def suppress_pv_user(
     *,
     suppressed_by: int | None,
     reason: str = "admin_panel",
+    username_hint: str | None = None,
 ) -> int:
     """Stop future PV work and neutralize pending Outbox actions for one user."""
     user_id = int(user_id)
@@ -103,6 +119,9 @@ async def suppress_pv_user(
                    LIMIT 1""",
                 user_id,
             )
+            if not username and username_hint:
+                token = normalize_target(username_hint)
+                username = token if token and not token.isdigit() else None
             await conn.execute(
                 """INSERT INTO pv_suppressed_users(
                      user_id,username,reason,active,suppressed_by,suppressed_at,resumed_at,updated_at)
