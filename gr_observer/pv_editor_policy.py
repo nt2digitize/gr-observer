@@ -40,6 +40,18 @@ class PvEditorPolicyMixin:
             return "photo"
         return None
 
+    @staticmethod
+    def _content_buttons(buttons):
+        """Keep legacy callbacks while presenting the now-generic content editor."""
+        for row in buttons or ():
+            for button in row or ():
+                if getattr(button, "text", None) == "✏️ Texto":
+                    button.text = "📎 Conteúdo"
+        return buttons
+
+    async def _render_editor(self, event, text: str, buttons) -> None:
+        await super()._render_editor(event, text, self._content_buttons(buttons))
+
     def _resolved_destination(self, content: str) -> str | None:
         value = content or ""
         if "{preview_link}" in value:
