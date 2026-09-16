@@ -48,12 +48,12 @@ class GroupControlPanel(
             f"Estado: {state}\n"
             f"Motivo: {reason}\n\n"
             "Falas, tempos, destino, fotos e campanhas do atendimento privado.\n"
-            "O controle individual abaixo para somente a automação da pessoa; "
-            "não bloqueia no Telegram e não remove o contato da agenda."
+            "O controle individual abaixo pausa somente o chat automático da pessoa escolhida; "
+            "não bloqueia no Telegram, não remove o contato da agenda e não afeta outros chats."
         )
         buttons = [
             [self._toggle_button("pv_reply", enabled, "Atendimento")],
-            [Button.inline("⏸ Tirar pessoa do funil", b"pvstop:picker")],
+            [Button.inline("⏸ Pausar chat de uma pessoa", b"pvstop:picker")],
             [Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")],
             [
                 Button.inline("📷 Fotos duas telas", b"pv:two_screens"),
@@ -80,24 +80,25 @@ class GroupControlPanel(
             identity = f"@{username}"
         else:
             identity = f"ID {user_id}"
-        return f"⛔ {identity} · {str(user_id)[-4:]}"[:60]
+        return f"⏸ {identity} · {str(user_id)[-4:]}"[:60]
 
     async def _show_pv_stop_picker(self, event, *, edit: bool = False) -> None:
         rows = await recent_pv_users(self.app.pool, limit=12)
         if not rows:
             text = (
-                "⛔ PARAR AUTOMAÇÃO DE UMA PESSOA\n\n"
+                "⏸ PAUSAR CHAT AUTOMÁTICO DE UMA PESSOA\n\n"
                 "Não há contatos recentes disponíveis para selecionar. "
                 "Você ainda pode usar /parar_usuario <ID ou @username>.\n\n"
-                "Isso não bloqueia a pessoa no Telegram e não remove o contato da agenda."
+                "Isso pausa somente a automação daquele chat. Não bloqueia a pessoa no Telegram, "
+                "não remove o contato da agenda e não afeta os outros chats."
             )
             buttons = [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
         else:
             text = (
-                "⛔ PARAR AUTOMAÇÃO DE UMA PESSOA\n\n"
-                "Mais recentes primeiro. Toque somente na pessoa que deve sair do funil. "
+                "⏸ PAUSAR CHAT AUTOMÁTICO DE UMA PESSOA\n\n"
+                "Mais recentes primeiro. Toque somente na pessoa cujo chat automático deve ser pausado. "
                 "O número final ajuda a diferenciar nomes iguais.\n\n"
-                "O contato continua salvo e o chat manual continua normal."
+                "O contato continua salvo, o chat manual continua normal e os outros chats não são afetados."
             )
             buttons = [
                 [
@@ -139,12 +140,13 @@ class GroupControlPanel(
                 reason="admin_panel",
             )
             await event.respond(
-                "⛔ USUÁRIO PARADO\n\n"
+                "⏸ CHAT AUTOMÁTICO PAUSADO\n\n"
                 f"Telegram user_id: {user_id}\n"
                 f"Ações PV pendentes neutralizadas: {neutralized}\n\n"
                 "Novas mensagens desse usuário não criam mais jornada automática. "
-                "Uma RPC que já estivesse em voo no exato instante do bloqueio pode terminar; "
-                "o restante da fila fica cortado. O contato e o chat manual permanecem intactos.",
+                "Uma RPC que já estivesse em voo no exato instante da pausa pode terminar; "
+                "o restante da fila fica cortado. O contato e o chat manual permanecem intactos. "
+                "Nenhum outro chat é afetado.",
                 parse_mode=None,
             )
             return True
@@ -152,9 +154,9 @@ class GroupControlPanel(
         if re.fullmatch(r"/(?:usuarios_parados|parados)", raw_text, flags=re.I):
             rows = await list_suppressed(self.app.pool)
             if not rows:
-                await event.respond("Nenhum usuário está parado pelo kill switch.", parse_mode=None)
+                await event.respond("Nenhum chat automático individual está pausado.", parse_mode=None)
                 return True
-            lines = ["⛔ USUÁRIOS PARADOS", ""]
+            lines = ["⏸ CHATS AUTOMÁTICOS PAUSADOS", ""]
             for row in rows:
                 username = row["username"] or "sem @username"
                 if username != "sem @username" and not str(username).startswith("@"):
@@ -209,7 +211,7 @@ class GroupControlPanel(
                 reason="admin_picker",
             )
             await event.answer(
-                f"Usuário parado. {neutralized} ação(ões) pendente(s) neutralizada(s).",
+                f"Chat automático pausado. {neutralized} ação(ões) pendente(s) neutralizada(s).",
                 alert=True,
             )
             await self._show_pv_stop_picker(event, edit=True)
