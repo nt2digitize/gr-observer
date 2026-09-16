@@ -113,14 +113,41 @@ class GroupControlPanel(
         self._pv_stop_input_mode = ""
         self._pv_stop_input_until = 0.0
 
+    async def _pv_stop_identity(self, user_id: int) -> tuple[str, str | None]:
+        """Return a human label for confirmation without exposing internal ids."""
+        row = await self.app.pool.fetchrow(
+            """SELECT username,display_name FROM pv_reply_contacts WHERE user_id=$1
+               UNION ALL
+               SELECT username,display_name FROM contact_ledger WHERE user_id=$1
+               LIMIT 1""",
+            int(user_id),
+        )
+        if row is None:
+            return "Abrir contato", None
+        username = str(row["username"] or "").strip().lstrip("@") or None
+        display_name = str(row["display_name"] or "").strip()
+        if display_name:
+            label = display_name
+        elif username:
+            label = f"@{username}"
+        else:
+            label = "Abrir contato"
+        return label[:50], username
+
     async def _show_pv_stop_confirmation(self, event, user_id: int) -> None:
+        label, username = await self._pv_stop_identity(user_id)
+        identity_line = f"Pessoa encontrada: {label}"
+        if username and label != f"@{username}":
+            identity_line += f"\n@{username}"
         text = (
             "⏸ CONFIRMAR PAUSA INDIVIDUAL\n\n"
-            f"Telegram user_id: {int(user_id)}\n\n"
+            f"{identity_line}\n\n"
+            "Toque no nome para conferir o contato certo antes de pausar.\n\n"
             "Isso pausa somente o chat automático desta pessoa. "
             "O contato continua salvo, o chat manual continua normal e nenhum outro chat é afetado."
         )
         buttons = [
+            [Button.url(f"👤 {label}", f"tg://user?id={int(user_id)}")],
             [Button.inline("✅ Pausar este chat", f"pvstop:confirm:{int(user_id)}".encode())],
             [Button.inline("↩️ Voltar", b"pvstop:picker")],
         ]
