@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS pv_message_steps (
 );
 CREATE INDEX IF NOT EXISTS pv_message_steps_order_idx
 ON pv_message_steps(block_key, branch_key, position, id);
+ALTER TABLE pv_message_steps
+ADD COLUMN IF NOT EXISTS media_source_peer BIGINT;
+ALTER TABLE pv_message_steps
+ADD COLUMN IF NOT EXISTS media_source_message_id BIGINT;
+ALTER TABLE pv_message_steps
+ADD COLUMN IF NOT EXISTS media_kind TEXT;
 """
 
 BLOCK_ORDER = (
