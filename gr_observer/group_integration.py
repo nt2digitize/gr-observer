@@ -44,31 +44,82 @@ class GroupControlPanel(
     _PV_STOP_INPUT_TIMEOUT_SECONDS = 180
 
     async def show_pv_menu(self, event) -> None:
-        """Expose the existing per-user kill switch in the daily PV surface."""
+        """Organize the PV operator surface without changing any runtime flow."""
         state, reason, enabled = self._module_state("pv_reply")
         text = (
             "💬 ATENDIMENTO PV\n\n"
             f"Estado: {state}\n"
             f"Motivo: {reason}\n\n"
-            "Falas, tempos, destino, fotos e campanhas do atendimento privado.\n"
-            "O controle individual abaixo pausa somente o chat automático da pessoa escolhida; "
-            "não bloqueia no Telegram, não remove o contato da agenda e não afeta outros chats."
+            "Organização do painel por responsabilidade. Os fluxos, estados, tempos, "
+            "Outbox e ações existentes continuam os mesmos."
         )
         buttons = [
             [self._toggle_button("pv_reply", enabled, "Atendimento")],
+            [
+                Button.inline("👋 Entrada", b"pvmenu:entry"),
+                Button.inline("📸 Duas telas / Homenagem", b"pvmenu:two_screens"),
+            ],
+            [
+                Button.inline("⚡ Eventos", b"pvmenu:events"),
+                Button.inline("♻️ Remarketing", b"pvmenu:remarketing"),
+            ],
+            [Button.inline("💭 Conversa livre", b"pvmenu:conversation")],
             [Button.inline("⏸ Pausar chat de uma pessoa", b"pvstop:picker")],
-            [Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")],
-            [
-                Button.inline("📷 Fotos duas telas", b"pv:two_screens"),
-                Button.inline("🔴 Nova live", b"live:new"),
-            ],
-            [
-                Button.inline("👤 Origens PV", b"origins"),
-                Button.inline("📝 Rascunhos", b"drafts"),
-            ],
+            [Button.inline("⚙️ Configuração", b"pvmenu:config")],
             [Button.inline("↩️ Início", b"home")],
         ]
         await self._render_menu(event, text, buttons)
+
+    async def _show_pv_section_menu(self, event, section: str) -> None:
+        """Route new visual sections to already-homologated operator actions."""
+        sections = {
+            "entry": (
+                "👋 ENTRADA",
+                "Saudação, primeiro acesso/link e pós-link. Nesta camada, a edição continua no editor existente.",
+                [[Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")]],
+            ),
+            "two_screens": (
+                "📸 DUAS TELAS / HOMENAGEM",
+                "Mídias e falas do ramo já existente. Nenhum estado do fluxo foi alterado.",
+                [
+                    [Button.inline("📷 Fotos duas telas", b"pv:two_screens")],
+                    [Button.inline("✏️ Falas e tempos", b"command:pv_preview")],
+                ],
+            ),
+            "events": (
+                "⚡ EVENTOS",
+                "A live atual continua sendo o evento disponível. A generalização virá em camada própria.",
+                [
+                    [Button.inline("🔴 Nova live", b"live:new")],
+                    [Button.inline("✏️ Falas do evento", b"command:pv_preview")],
+                ],
+            ),
+            "remarketing": (
+                "♻️ REMARKETING",
+                "Follow-ups e cadências atuais continuam intactos; apenas a navegação foi agrupada.",
+                [[Button.inline("✏️ Falas e tempos", b"command:pv_preview")]],
+            ),
+            "conversation": (
+                "💭 CONVERSA LIVRE",
+                "Área reservada para Contextos e Memória, fatos e respostas observadas. Nesta camada nada novo responde automaticamente.",
+                [
+                    [Button.inline("👤 Origens PV", b"origins")],
+                    [Button.inline("📝 Rascunhos", b"drafts")],
+                ],
+            ),
+            "config": (
+                "⚙️ CONFIGURAÇÃO — PV",
+                "Configuração existente do Atendimento PV, sem nova variável, serviço ou worker.",
+                [[Button.inline("✏️ Falas, tempos + destino", b"command:pv_preview")]],
+            ),
+        }
+        selected = sections.get(section)
+        if selected is None:
+            await self.show_pv_menu(event)
+            return
+        title, description, buttons = selected
+        buttons = list(buttons) + [[Button.inline("↩️ Atendimento PV", b"menu:pv")]]
+        await self._render_menu(event, f"{title}\n\n{description}", buttons)
 
     @staticmethod
     def _pv_stop_label(row) -> str:
@@ -144,7 +195,8 @@ class GroupControlPanel(
             f"{identity_line}\n\n"
             "Toque no nome para conferir o contato certo antes de pausar.\n\n"
             "Isso pausa somente o chat automático desta pessoa. "
-            "O contato continua salvo, o chat manual continua normal e nenhum outro chat é afetado."
+            "O contato continua salvo, o chat manual continua normal, não bloqueia no Telegram "
+            "e nenhum outro chat é afetado."
         )
         buttons = [
             [Button.url(f"👤 {label}", f"tg://user?id={int(user_id)}")],
@@ -291,6 +343,13 @@ class GroupControlPanel(
             await super().on_callback(event)
             return
         data = event.data.decode("utf-8", errors="replace")
+        section_match = re.fullmatch(
+            r"pvmenu:(entry|two_screens|events|remarketing|conversation|config)", data
+        )
+        if section_match:
+            await event.answer()
+            await self._show_pv_section_menu(event, section_match.group(1))
+            return
         if data == "pvstop:picker":
             self._clear_pv_stop_input()
             await event.answer()
