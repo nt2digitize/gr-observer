@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from gr_observer.group_membership_tracker import (
     DDL,
     GroupMembershipTracker,
+    _is_stale_order,
     membership_change_from_update,
 )
 from gr_observer.modules.pv_reply_production import PvReplyProduction
@@ -130,6 +131,13 @@ class MembershipClassifierTests(unittest.TestCase):
         self.assertEqual(joined.user_id, left.user_id)
         self.assertEqual(joined.chat_id, left.chat_id)
 
+    def test_out_of_order_telegram_sequence_is_stale(self):
+        self.assertTrue(_is_stale_order(12, 11))
+        self.assertTrue(_is_stale_order(12, 12))
+        self.assertFalse(_is_stale_order(12, 13))
+        self.assertFalse(_is_stale_order(None, 13))
+        self.assertFalse(_is_stale_order(12, None))
+
 
 class MembershipSafetyContractTests(unittest.TestCase):
     def test_tracker_observe_has_no_sending_surface(self):
@@ -142,6 +150,14 @@ class MembershipSafetyContractTests(unittest.TestCase):
         ddl = DDL.casefold()
         self.assertNotIn("invite_link", ddl)
         self.assertNotIn("actor_id", ddl)
+
+    def test_stale_event_is_recorded_but_cannot_regress_current_state(self):
+        source = inspect.getsource(GroupMembershipTracker.observe)
+        event_insert = source.index("INSERT INTO pv_group_membership_events")
+        stale_guard = source.index("_is_stale_order")
+        state_upsert = source.index("INSERT INTO pv_group_membership_state")
+        self.assertLess(event_insert, stale_guard)
+        self.assertLess(stale_guard, state_upsert)
 
     def test_integration_reuses_existing_pv_client(self):
         source = inspect.getsource(PvReplyProduction)
