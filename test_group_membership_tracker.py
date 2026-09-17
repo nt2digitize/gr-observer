@@ -67,6 +67,65 @@ class UpdateChatParticipantDelete:
         self.version = 9
 
 
+class FakeMembershipDb:
+    def __init__(self, *, known=True):
+        self.known = known
+        self.events = set()
+        self.state = {}
+
+    def acquire(self):
+        return self
+
+    def transaction(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def fetchval(self, query, *args):
+        if "EXISTS(SELECT 1 FROM contact_ledger" in query:
+            return self.known
+        if "INSERT INTO pv_group_membership_events" in query:
+            event_key = str(args[0])
+            if event_key in self.events:
+                return None
+            self.events.add(event_key)
+            return event_key
+        if "SELECT last_telegram_order FROM pv_group_membership_state" in query:
+            row = self.state.get((int(args[0]), int(args[1])))
+            return None if row is None else row["last_telegram_order"]
+        raise AssertionError(f"fetchval inesperado: {query}")
+
+    async def execute(self, query, *args):
+        if query is DDL or "CREATE TABLE IF NOT EXISTS" in query:
+            return "OK"
+        if "INSERT INTO pv_group_membership_state" not in query:
+            return "OK"
+        chat_id, user_id, status, event_at, reason, preview_group, order = args
+        key = (int(chat_id), int(user_id))
+        row = self.state.get(key)
+        if row is None:
+            row = {
+                "status": str(status),
+                "join_count": 0,
+                "leave_count": 0,
+                "preview_group": False,
+                "last_telegram_order": None,
+            }
+            self.state[key] = row
+        row["status"] = str(status)
+        row["join_count"] += int(status == "joined")
+        row["leave_count"] += int(status == "left")
+        row["preview_group"] = bool(row["preview_group"] or preview_group)
+        row["last_telegram_order"] = order
+        row["last_change_at"] = event_at
+        row["last_reason"] = reason
+        return "OK"
+
+
 class MembershipClassifierTests(unittest.TestCase):
     def test_join_marks_preview_group_when_invite_matches(self):
         link = "https://t.me/+PreviewABC"
@@ -137,6 +196,57 @@ class MembershipClassifierTests(unittest.TestCase):
         self.assertFalse(_is_stale_order(12, 13))
         self.assertFalse(_is_stale_order(None, 13))
         self.assertFalse(_is_stale_order(12, None))
+
+
+class MembershipPersistenceSimulationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_join_duplicate_leave_rejoin_sequence(self):
+        db = FakeMembershipDb()
+        tracker = GroupMembershipTracker(db)
+        join = UpdateChannelParticipant(prev=None, new=ChannelParticipant(), qts=1)
+        leave = UpdateChannelParticipant(
+            prev=ChannelParticipant(), new=ChannelParticipantLeft(), qts=2
+        )
+        rejoin = UpdateChannelParticipant(
+            prev=ChannelParticipantLeft(), new=ChannelParticipant(), qts=3
+        )
+
+        self.assertEqual(await tracker.observe(join), "joined")
+        self.assertEqual(await tracker.observe(join), "duplicate")
+        self.assertEqual(await tracker.observe(leave), "left")
+        self.assertEqual(await tracker.observe(rejoin), "joined")
+
+        self.assertEqual(len(db.events), 3)
+        row = next(iter(db.state.values()))
+        self.assertEqual(row["status"], "joined")
+        self.assertEqual(row["join_count"], 2)
+        self.assertEqual(row["leave_count"], 1)
+        self.assertEqual(row["last_telegram_order"], 3)
+
+    async def test_late_update_does_not_regress_current_state(self):
+        db = FakeMembershipDb()
+        tracker = GroupMembershipTracker(db)
+        newest = UpdateChannelParticipant(prev=None, new=ChannelParticipant(), qts=5)
+        late = UpdateChannelParticipant(
+            prev=ChannelParticipant(), new=ChannelParticipantLeft(), qts=4
+        )
+
+        self.assertEqual(await tracker.observe(newest), "joined")
+        self.assertEqual(await tracker.observe(late), "stale")
+        row = next(iter(db.state.values()))
+        self.assertEqual(row["status"], "joined")
+        self.assertEqual(row["join_count"], 1)
+        self.assertEqual(row["leave_count"], 0)
+        self.assertEqual(row["last_telegram_order"], 5)
+        self.assertEqual(len(db.events), 2)
+
+    async def test_unknown_lead_is_not_persisted(self):
+        db = FakeMembershipDb(known=False)
+        tracker = GroupMembershipTracker(db)
+        join = UpdateChannelParticipant(prev=None, new=ChannelParticipant(), qts=1)
+
+        self.assertEqual(await tracker.observe(join), "ignored_unknown_lead")
+        self.assertFalse(db.events)
+        self.assertFalse(db.state)
 
 
 class MembershipSafetyContractTests(unittest.TestCase):
