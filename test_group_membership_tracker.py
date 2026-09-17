@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 
 from gr_observer.group_membership_tracker import (
+    DDL,
     GroupMembershipTracker,
     membership_change_from_update,
 )
@@ -136,6 +137,11 @@ class MembershipSafetyContractTests(unittest.TestCase):
         self.assertNotIn("outbox", source.casefold())
         self.assertNotIn("send_message", source)
         self.assertNotIn("effects.", source)
+
+    def test_shadow_does_not_persist_raw_invite_or_actor_identity(self):
+        ddl = DDL.casefold()
+        self.assertNotIn("invite_link", ddl)
+        self.assertNotIn("actor_id", ddl)
 
     def test_integration_reuses_existing_pv_client(self):
         source = inspect.getsource(PvReplyProduction)
