@@ -86,6 +86,20 @@ A auditoria identificou regras de progressão antigas em:
 
 Esses componentes não devem ser apagados antes de suas funções úteis terem sido absorvidas pela linha. Durante a transição eles são legado controlado, não arquitetura final.
 
+## Cutover reversível
+
+Enquanto `PV_LINEAR_FLOW_ENABLED=OFF`, a máquina legada continua disponível para rollback e seus dados necessários não são removidos pela PR do motor linear.
+
+Quando `PV_LINEAR_FLOW_ENABLED=ON`:
+
+- inbound humano é entregue ao motor linear;
+- ações de progressão legadas são quarentenadas antes de produzir nova mutação Telegram;
+- continuações `send_message_step` legadas não podem avançar a conversa;
+- fallback/foto autônoma de Duas Telas e fechamento autônomo de Live ficam inertes até serem reincorporados como capacidades controladas pela linha;
+- opt-out permanece ativo como guardrail global e neutraliza trabalho pendente da pessoa.
+
+Portanto ligar a flag não é autorizado antes de a linha ter as capacidades necessárias para a homologação escolhida.
+
 ## Sequência de aposentadoria
 
 1. homologar o motor linear com feature flag OFF por padrão;
@@ -113,5 +127,5 @@ A migração termina quando uma inspeção do runtime comprovar que, com o motor
 - nenhuma continuação antiga cria uma segunda progressão;
 - Duas Telas e Live são chamadas como capacidades, não como chefes de fluxo;
 - ações legadas pendentes não conseguem interferir na nova conversa;
-- uma sessão USER, uma Outbox e um Writer permanecem intactos;
+- opt-out, uma sessão USER, uma Outbox e um Writer permanecem intactos;
 - CI e testes de regressão cobrem o contrato acima.
