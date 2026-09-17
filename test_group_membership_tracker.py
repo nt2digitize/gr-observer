@@ -2,11 +2,11 @@ import inspect
 import unittest
 from datetime import datetime, timezone
 
-from gr_observer.application_membership import MembershipObserver
 from gr_observer.group_membership_tracker import (
     GroupMembershipTracker,
     membership_change_from_update,
 )
+from gr_observer.modules.pv_reply_production import PvReplyProduction
 
 
 class ChannelParticipant:
@@ -136,19 +136,24 @@ class MembershipSafetyContractTests(unittest.TestCase):
         self.assertNotIn("outbox", source.casefold())
         self.assertNotIn("send_message", source)
         self.assertNotIn("effects.", source)
-        self.assertNotIn("enqueue", source)
 
-    def test_integration_reuses_existing_user_runtime(self):
-        source = inspect.getsource(MembershipObserver)
-        self.assertIn("await super().user_runtime()", source)
+    def test_integration_reuses_existing_pv_client(self):
+        source = inspect.getsource(PvReplyProduction)
+        self.assertIn("GroupMembershipTracker", source)
         self.assertIn("events.Raw", source)
+        self.assertIn("UpdateChannelParticipant", source)
         self.assertNotIn("TelegramClient(", source)
         self.assertNotIn("SafeOutboxWriter", source)
 
     def test_membership_failures_are_isolated(self):
-        source = inspect.getsource(MembershipObserver._observe_membership_update)
+        source = inspect.getsource(PvReplyProduction._on_membership_update)
         self.assertIn("except Exception", source)
         self.assertNotIn("pause_module", source)
+
+    def test_membership_handler_is_removed_on_disconnect(self):
+        source = inspect.getsource(PvReplyProduction.on_disconnect)
+        self.assertIn("remove_event_handler(self._membership_handler)", source)
+        self.assertIn("self._membership_handler = None", source)
 
 
 if __name__ == "__main__":
