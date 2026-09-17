@@ -36,7 +36,7 @@ class PvReplyProduction(PvReplyWithContacts):
         self._native_block_handler = None
         self.membership_tracker = GroupMembershipTracker(
             storage.pool,
-            preview_link=settings.pv_preview_link,
+            preview_link=getattr(settings, "pv_preview_link", ""),
         )
         self._membership_tracker_ready = False
         self._membership_handler = None
