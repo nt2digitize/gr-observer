@@ -101,9 +101,19 @@ class PvLinearPanelMixin:
             step_id = int(toggle.group(1))
             linear, _ = await self._linear_stores()
             row = await linear.get_step(step_id)
-            if row is not None:
-                await linear.set_wait_for_reply(step_id, not bool(row["wait_for_reply"]))
-            await event.answer("Regra atualizada.")
+            if row is None:
+                await event.answer("Balão não encontrado.", alert=True)
+                await self.show_linear_conversation(event)
+                return
+            requested = not bool(row["wait_for_reply"])
+            changed = await linear.set_wait_for_reply(step_id, requested)
+            if requested and not changed:
+                await event.answer(
+                    "Antes do link da prévia, a conversa continua automaticamente.",
+                    alert=True,
+                )
+            else:
+                await event.answer("Regra atualizada.")
             await self.show_linear_conversation(event, step_id)
             return
 
