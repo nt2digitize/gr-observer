@@ -12,6 +12,50 @@ from .pv_message_panel import PvMessageEditorPanelMixin as _BasePvMessageEditorP
 from .pv_message_steps import MAX_MEDIAN_SECONDS
 
 
+_MEDIA_DISPLAY_LABELS = {
+    "photo": "📷 Foto",
+    "video": "🎬 Vídeo",
+    "gif": "🎞 GIF",
+}
+
+
+class _EditorDisplayStore:
+    """Read-only display view that labels media-only rows without changing stored copy."""
+
+    def __init__(self, store):
+        self._store = store
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    @staticmethod
+    def _row(row):
+        if row is None:
+            return None
+        try:
+            content = str(row["content"] or "").strip()
+            media_kind = row["media_kind"]
+        except (KeyError, TypeError):
+            return row
+        if content or not media_kind:
+            return row
+        rendered = dict(row)
+        rendered["content"] = _MEDIA_DISPLAY_LABELS.get(
+            str(media_kind),
+            f"📎 {media_kind}",
+        )
+        return rendered
+
+    async def get(self, *args, **kwargs):
+        return self._row(await self._store.get(*args, **kwargs))
+
+    async def list_all(self, *args, **kwargs):
+        return [self._row(row) for row in await self._store.list_all(*args, **kwargs)]
+
+    async def block_rows(self, *args, **kwargs):
+        return [self._row(row) for row in await self._store.block_rows(*args, **kwargs)]
+
+
 class PvEditorPolicyMixin:
     """Editor navigation never mutates copy; explicit input is required to edit."""
 
@@ -48,6 +92,38 @@ class PvEditorPolicyMixin:
                 if getattr(button, "text", None) == "✏️ Texto":
                     button.text = "📎 Conteúdo"
         return buttons
+
+    def _message_store(self):
+        store = super()._message_store()
+        if bool(getattr(self, "_pv_media_display_view", False)):
+            return _EditorDisplayStore(store)
+        return store
+
+    async def show_phase(
+        self,
+        event,
+        block_key: str,
+        selected_id: int | None = None,
+    ) -> None:
+        previous = bool(getattr(self, "_pv_media_display_view", False))
+        self._pv_media_display_view = True
+        try:
+            await super().show_phase(event, block_key, selected_id)
+        finally:
+            self._pv_media_display_view = previous
+
+    async def show_sequence(
+        self,
+        event,
+        root_id: int,
+        selected_id: int | None = None,
+    ) -> None:
+        previous = bool(getattr(self, "_pv_media_display_view", False))
+        self._pv_media_display_view = True
+        try:
+            await super().show_sequence(event, root_id, selected_id)
+        finally:
+            self._pv_media_display_view = previous
 
     async def _render_editor(self, event, text: str, buttons) -> None:
         await super()._render_editor(event, text, self._content_buttons(buttons))
