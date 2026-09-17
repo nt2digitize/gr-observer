@@ -73,6 +73,23 @@ class PvLinearArchitectureTests(unittest.TestCase):
         with patch.dict(os.environ, {"PV_LINEAR_FLOW_ENABLED": "true"}):
             self.assertTrue(linear_flow_enabled())
 
+    def test_linear_mode_quarantines_legacy_sequencer(self):
+        source = inspect.getsource(PvReplyProduction)
+        self.assertIn("legacy_flow_disabled", source)
+        self.assertIn("async def _run_block", source)
+        for action in (
+            "action_auto_queue_two_screens_photo",
+            "action_send_two_screens_photo",
+            "action_close_live_recipient",
+            "action_send_message_step",
+        ):
+            self.assertIn(f"async def {action}", source)
+
+    def test_linear_branch_never_restores_removed_reminder_link(self):
+        source = inspect.getsource(PvReplyProduction._restore_missing_required_destinations)
+        self.assertNotIn("reminder.link", source)
+        self.assertNotIn("reminder_link", source)
+
 
 class PvLinearPanelContractTests(unittest.TestCase):
     def test_operator_controls_match_single_line_model(self):
