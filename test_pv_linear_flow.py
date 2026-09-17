@@ -52,12 +52,12 @@ class PvLinearArchitectureTests(unittest.TestCase):
         self.assertIn("INSERT INTO outbox_actions", source)
         self.assertIn("send_linear_balloon", source)
 
-    def test_linear_flow_does_not_classify_or_suppress_by_message_text(self):
+    def test_linear_progression_does_not_classify_positive_or_negative_text(self):
         source = inspect.getsource(PvLinearRuntimeMixin)
-        self.assertNotIn("suppress_pv_user", source)
-        self.assertNotIn("lead_opt_out", source)
-        self.assertNotIn("não me mande", source)
-        self.assertNotIn("nao me mande", source)
+        self.assertNotIn("classify_response", source)
+        self.assertNotIn("response_kind", source)
+        self.assertNotIn("positive", source)
+        self.assertNotIn("negative", source)
 
     def test_wait_for_reply_is_per_contact_persistent_state(self):
         source = inspect.getsource(PvLinearRuntimeMixin)
@@ -85,10 +85,18 @@ class PvLinearArchitectureTests(unittest.TestCase):
         ):
             self.assertIn(f"async def {action}", source)
 
-    def test_linear_branch_never_restores_removed_reminder_link(self):
+    def test_legacy_required_rows_remain_available_for_flag_off_rollback(self):
         source = inspect.getsource(PvReplyProduction._restore_missing_required_destinations)
-        self.assertNotIn("reminder.link", source)
-        self.assertNotIn("reminder_link", source)
+        self.assertIn("reminder.link", source)
+        self.assertIn("reminder_link", source)
+
+    def test_opt_out_survives_as_guardrail_not_progression_engine(self):
+        source = inspect.getsource(PvReplyProduction._linear_opt_out)
+        self.assertIn('!= "opt_out"', source)
+        self.assertIn("suppress_pv_user", source)
+        self.assertIn("status='stopped'", source)
+        self.assertNotIn("positive", source)
+        self.assertNotIn("negative", source)
 
 
 class PvLinearPanelContractTests(unittest.TestCase):
