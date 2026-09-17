@@ -14,7 +14,7 @@ from telethon.tl.functions.contacts import GetBlockedRequest
 
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
-from ..pv_linear_flow import PvLinearRuntimeMixin
+from ..pv_linear_flow import PvLinearRuntimeMixin, linear_flow_enabled
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
@@ -41,6 +41,27 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
             enabled=bool(getattr(settings, "pv_minilearn_shadow_enabled", False)),
         )
         self._response_memory_shadow_ready = False
+
+    async def _run_block(self, *args, **kwargs) -> dict:
+        """Quarantine the legacy sequencer whenever the linear engine owns PV."""
+        if linear_flow_enabled():
+            return {"sent": False, "reason": "legacy_flow_disabled"}
+        return await super()._run_block(*args, **kwargs)
+
+    async def action_auto_queue_two_screens_photo(self, action: dict, effects) -> dict:
+        if linear_flow_enabled():
+            return {"sent": False, "reason": "legacy_flow_disabled"}
+        return await super().action_auto_queue_two_screens_photo(action, effects)
+
+    async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
+        if linear_flow_enabled():
+            return {"sent": False, "reason": "legacy_flow_disabled"}
+        return await super().action_send_two_screens_photo(action, effects)
+
+    async def action_close_live_recipient(self, action: dict, effects) -> dict:
+        if linear_flow_enabled():
+            return {"sent": False, "reason": "legacy_flow_disabled"}
+        return await super().action_close_live_recipient(action, effects)
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
@@ -252,11 +273,9 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""
-        reply_delay = max(MIN_WRITING_DELAY_SECONDS, int(self.settings.pv_reply_delay_seconds))
         rows = (
             ("link.preview", "link", POSITION_GAP * 2, "Link da prévia", "{preview_link}", 7),
             ("followup.link", "followup", POSITION_GAP * 2, "Link do follow-up", "{preview_link}", 3),
-            ("reminder.link", "reminder_link", POSITION_GAP, "Reenvio do link", "{preview_link}", reply_delay),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
             # Destination-pair migration owns position 1; the actual destination is position 2.
@@ -300,6 +319,8 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
         return await super()._queue_sequence_continuation(**kwargs)
 
     async def action_send_message_step(self, action: dict, effects) -> dict:
+        if linear_flow_enabled():
+            return {"sent": False, "reason": "legacy_flow_disabled"}
         payload = action.get("payload") or {}
         context = dict(payload.get("context") or {})
         guard = context.get("_pv_guard")
