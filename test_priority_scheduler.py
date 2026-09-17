@@ -48,27 +48,9 @@ class PriorityPolicyTests(unittest.TestCase):
         self.assertEqual(
             base_priority(
                 "pv_reply",
-                "send_reminder_link",
-                action_key="pv_reply:conditional-link:99:weekly:4",
-                origin_age_seconds=30,
-            ),
-            P0_LIVE_HUMAN,
-        )
-        self.assertEqual(
-            base_priority(
-                "pv_reply",
                 "send_live_link",
                 action_key="pv_reply:automated-live-link:44:99",
                 origin_age_seconds=30,
-            ),
-            P2_NORMAL,
-        )
-        self.assertEqual(
-            base_priority(
-                "pv_reply",
-                "send_reminder_link",
-                action_key="pv_reply:conditional-link:99:weekly:4",
-                origin_age_seconds=FRESH_HUMAN_TTL_SECONDS + 1,
             ),
             P2_NORMAL,
         )
@@ -76,17 +58,20 @@ class PriorityPolicyTests(unittest.TestCase):
     def test_contextual_p0_provenance_is_structurally_bound_to_inbound_pv(self):
         storage = (ROOT / "gr_observer" / "storage.py").read_text(encoding="utf-8")
         self.assertEqual(storage.count("pv_reply:live-link:"), 1)
-        self.assertEqual(storage.count("pv_reply:conditional-link:"), 1)
+        self.assertEqual(storage.count("pv_reply:conditional-link:"), 0)
+        self.assertNotIn("send_reminder_link", storage)
         from gr_observer.storage import Storage
 
         inbound = inspect.getsource(Storage.accept_pv_message)
         self.assertIn("pv_reply:live-link:", inbound)
-        self.assertIn("pv_reply:conditional-link:", inbound)
+        self.assertNotIn("pv_reply:conditional-link:", inbound)
+        self.assertNotIn("send_reminder_link", inbound)
 
     def test_sql_uses_same_provenance_and_recency_rule(self):
         sql = priority_case_sql("actions")
         self.assertIn("actions.action_key LIKE 'pv_reply:live-link:%'", sql)
-        self.assertIn("actions.action_key LIKE 'pv_reply:conditional-link:%'", sql)
+        self.assertNotIn("pv_reply:conditional-link:%", sql)
+        self.assertNotIn("send_reminder_link", sql)
         self.assertIn(f"INTERVAL '{FRESH_HUMAN_TTL_SECONDS} seconds'", sql)
         self.assertIn("actions.created_at", sql)
 
