@@ -1,8 +1,7 @@
 """Passive group-membership tracker for known PV leads.
 
-This component is deliberately read-only with respect to Telegram: it consumes raw
-membership updates and persists local facts. It never creates Outbox actions, never
-calls Telegram methods and never sends a message.
+Consumes Telegram membership updates and persists only the operational facts
+needed by the PV journey. It never creates Outbox actions or mutates Telegram.
 """
 
 from __future__ import annotations
@@ -21,8 +20,6 @@ CREATE TABLE IF NOT EXISTS pv_group_membership_events (
   user_id BIGINT NOT NULL,
   transition TEXT NOT NULL CHECK(transition IN ('joined','left')),
   reason TEXT NOT NULL,
-  actor_id BIGINT,
-  invite_link TEXT,
   preview_link_match BOOLEAN NOT NULL DEFAULT FALSE,
   telegram_order BIGINT,
   event_at TIMESTAMPTZ NOT NULL,
@@ -44,8 +41,6 @@ CREATE TABLE IF NOT EXISTS pv_group_membership_state (
   join_count INTEGER NOT NULL DEFAULT 0,
   leave_count INTEGER NOT NULL DEFAULT 0,
   last_reason TEXT NOT NULL,
-  last_actor_id BIGINT,
-  last_invite_link TEXT,
   preview_group BOOLEAN NOT NULL DEFAULT FALSE,
   last_telegram_order BIGINT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -65,8 +60,6 @@ class MembershipChange:
     user_id: int
     transition: str
     reason: str
-    actor_id: int | None
-    invite_link: str | None
     preview_link_match: bool
     telegram_order: int | None
     event_at: datetime
@@ -92,17 +85,17 @@ def _participant_present(participant) -> bool:
     if kind == "ChannelParticipantLeft":
         return False
     if kind == "ChannelParticipantBanned":
-        # Telegram uses this constructor both for kicked/left users and for
-        # members with granular restrictions. Only left=True means absent.
         return not bool(getattr(participant, "left", False))
     return True
 
 
-def _invite_link(update) -> str | None:
+def _preview_link_matches(update, preview_link: str) -> bool:
+    expected = _clean_link(preview_link)
+    if not expected:
+        return False
     invite = getattr(update, "invite", None)
-    value = getattr(invite, "link", None) if invite is not None else None
-    clean = (value or "").strip()
-    return clean or None
+    actual = _clean_link(getattr(invite, "link", None) if invite is not None else None)
+    return bool(actual and actual == expected)
 
 
 def _event_key(*parts) -> str:
@@ -115,12 +108,8 @@ def membership_change_from_update(
     *,
     preview_link: str = "",
 ) -> MembershipChange | None:
-    """Reduce supported raw Telegram updates to a membership transition.
-
-    Admin/restriction changes that keep the person in the group are ignored.
-    """
+    """Reduce supported raw Telegram updates to a membership transition."""
     name = type(update).__name__
-    clean_preview = _clean_link(preview_link)
 
     if name == "UpdateChannelParticipant":
         before = _participant_present(getattr(update, "prev_participant", None))
@@ -129,40 +118,32 @@ def membership_change_from_update(
             return None
         transition = "joined" if after else "left"
         new_participant = getattr(update, "new_participant", None)
-        if transition == "left" and type(new_participant).__name__ == "ChannelParticipantBanned":
-            reason = "kicked_or_banned"
-        else:
-            reason = "channel_participant_update"
+        reason = (
+            "kicked_or_banned"
+            if transition == "left"
+            and type(new_participant).__name__ == "ChannelParticipantBanned"
+            else "channel_participant_update"
+        )
         channel_id = int(getattr(update, "channel_id"))
         chat_id = int(utils.get_peer_id(types.PeerChannel(channel_id)))
         user_id = int(getattr(update, "user_id"))
-        actor_id = getattr(update, "actor_id", None)
-        actor_id = int(actor_id) if actor_id is not None else None
         order = getattr(update, "qts", None)
         order = int(order) if order is not None else None
-        invite_link = _invite_link(update)
         event_at = _utc(getattr(update, "date", None))
-        key = _event_key(
-            "channel",
-            channel_id,
-            user_id,
-            order,
-            int(event_at.timestamp()),
-            transition,
-        )
         return MembershipChange(
-            event_key=key,
+            event_key=_event_key(
+                "channel",
+                channel_id,
+                user_id,
+                order,
+                int(event_at.timestamp()),
+                transition,
+            ),
             chat_id=chat_id,
             user_id=user_id,
             transition=transition,
             reason=reason,
-            actor_id=actor_id,
-            invite_link=invite_link,
-            preview_link_match=bool(
-                clean_preview
-                and invite_link
-                and _clean_link(invite_link) == clean_preview
-            ),
+            preview_link_match=_preview_link_matches(update, preview_link),
             telegram_order=order,
             event_at=event_at,
         )
@@ -171,8 +152,6 @@ def membership_change_from_update(
         raw_chat_id = int(getattr(update, "chat_id"))
         chat_id = int(utils.get_peer_id(types.PeerChat(raw_chat_id)))
         user_id = int(getattr(update, "user_id"))
-        actor_id = getattr(update, "inviter_id", None)
-        actor_id = int(actor_id) if actor_id is not None else None
         order = getattr(update, "version", None)
         order = int(order) if order is not None else None
         event_at = _utc(getattr(update, "date", None))
@@ -184,8 +163,6 @@ def membership_change_from_update(
             user_id=user_id,
             transition="joined",
             reason="basic_group_add",
-            actor_id=actor_id,
-            invite_link=None,
             preview_link_match=False,
             telegram_order=order,
             event_at=event_at,
@@ -204,8 +181,6 @@ def membership_change_from_update(
             user_id=user_id,
             transition="left",
             reason="basic_group_delete",
-            actor_id=None,
-            invite_link=None,
             preview_link_match=False,
             telegram_order=order,
             event_at=event_at,
@@ -251,9 +226,9 @@ class GroupMembershipTracker:
             async with conn.transaction():
                 inserted = await conn.fetchval(
                     """INSERT INTO pv_group_membership_events(
-                         event_key,chat_id,user_id,transition,reason,actor_id,
-                         invite_link,preview_link_match,telegram_order,event_at)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                         event_key,chat_id,user_id,transition,reason,
+                         preview_link_match,telegram_order,event_at)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
                        ON CONFLICT(event_key) DO NOTHING
                        RETURNING event_key""",
                     change.event_key,
@@ -261,8 +236,6 @@ class GroupMembershipTracker:
                     change.user_id,
                     change.transition,
                     change.reason,
-                    change.actor_id,
-                    change.invite_link,
                     change.preview_link_match,
                     change.telegram_order,
                     change.event_at,
@@ -275,8 +248,7 @@ class GroupMembershipTracker:
                     """INSERT INTO pv_group_membership_state(
                          chat_id,user_id,status,first_joined_at,last_joined_at,
                          last_left_at,last_change_at,join_count,leave_count,
-                         last_reason,last_actor_id,last_invite_link,preview_group,
-                         last_telegram_order,updated_at)
+                         last_reason,preview_group,last_telegram_order,updated_at)
                        VALUES(
                          $1,$2,$3,
                          CASE WHEN $3='joined' THEN $4 ELSE NULL END,
@@ -285,7 +257,7 @@ class GroupMembershipTracker:
                          $4,
                          CASE WHEN $3='joined' THEN 1 ELSE 0 END,
                          CASE WHEN $3='left' THEN 1 ELSE 0 END,
-                         $5,$6,$7,$8,$9,NOW()
+                         $5,$6,$7,NOW()
                        )
                        ON CONFLICT(chat_id,user_id) DO UPDATE SET
                          status=EXCLUDED.status,
@@ -307,11 +279,6 @@ class GroupMembershipTracker:
                          leave_count=pv_group_membership_state.leave_count
                            + CASE WHEN EXCLUDED.status='left' THEN 1 ELSE 0 END,
                          last_reason=EXCLUDED.last_reason,
-                         last_actor_id=EXCLUDED.last_actor_id,
-                         last_invite_link=COALESCE(
-                           EXCLUDED.last_invite_link,
-                           pv_group_membership_state.last_invite_link
-                         ),
                          preview_group=(
                            pv_group_membership_state.preview_group
                            OR EXCLUDED.preview_group
@@ -323,8 +290,6 @@ class GroupMembershipTracker:
                     change.transition,
                     change.event_at,
                     change.reason,
-                    change.actor_id,
-                    change.invite_link,
                     change.preview_link_match,
                     change.telegram_order,
                 )
