@@ -21,6 +21,7 @@ from .modules.pv_reply import display_name, is_human_sender
 
 LINEAR_MIGRATION_VERSION = 4
 LINEAR_POSITION_GAP = Decimal("1000000")
+PREVIEW_LINK_STEP_KEY = "link.preview"
 
 PHASE_DEFAULTS = (
     (
@@ -103,6 +104,21 @@ class PvLinearConversationStore:
         self.pool = pool
         self._ready = False
 
+    @staticmethod
+    async def _clear_pre_preview_waits(conn) -> None:
+        """Keep ADR-004 true after operator reordering or stale configuration."""
+        await conn.execute(
+            """UPDATE pv_message_steps
+               SET wait_for_reply=FALSE,updated_at=NOW()
+               WHERE linear_enabled IS TRUE
+                 AND wait_for_reply IS TRUE
+                 AND linear_position < (
+                   SELECT linear_position FROM pv_message_steps
+                   WHERE step_key=$1 AND linear_enabled IS TRUE
+                 )""",
+            PREVIEW_LINK_STEP_KEY,
+        )
+
     async def ensure_ready(self) -> None:
         if self._ready:
             return
@@ -166,6 +182,7 @@ class PvLinearConversationStore:
                            VALUES($1) ON CONFLICT(version) DO NOTHING""",
                         LINEAR_MIGRATION_VERSION,
                     )
+                await self._clear_pre_preview_waits(conn)
         self._ready = True
 
     async def phases(self):
@@ -207,8 +224,29 @@ class PvLinearConversationStore:
             Decimal(str(after_position)),
         )
 
+    async def wait_for_reply_allowed(self, step_id: int) -> bool:
+        """A human reply may gate the journey only after the preview link step."""
+        await self.ensure_ready()
+        current_position = await self.pool.fetchval(
+            """SELECT linear_position FROM pv_message_steps
+               WHERE id=$1 AND linear_enabled IS TRUE""",
+            int(step_id),
+        )
+        if current_position is None:
+            return False
+        preview_position = await self.pool.fetchval(
+            """SELECT linear_position FROM pv_message_steps
+               WHERE step_key=$1 AND linear_enabled IS TRUE""",
+            PREVIEW_LINK_STEP_KEY,
+        )
+        if preview_position is None:
+            return True
+        return Decimal(current_position) >= Decimal(preview_position)
+
     async def set_wait_for_reply(self, step_id: int, enabled: bool) -> bool:
         await self.ensure_ready()
+        if bool(enabled) and not await self.wait_for_reply_allowed(step_id):
+            return False
         changed = await self.pool.fetchval(
             """UPDATE pv_message_steps SET wait_for_reply=$2,updated_at=NOW()
                WHERE id=$1 AND linear_enabled IS TRUE RETURNING id""",
@@ -266,6 +304,7 @@ class PvLinearConversationStore:
                     int(neighbor["id"]),
                     current["linear_position"],
                 )
+                await self._clear_pre_preview_waits(conn)
                 return True
 
     async def remove_from_line(self, step_id: int) -> bool:
@@ -541,7 +580,7 @@ class PvLinearRuntimeMixin:
             origin_key=str(action["action_key"]),
             variables={},
         )
-        if bool(row["wait_for_reply"]):
+        if bool(row["wait_for_reply"]) and await self.linear_store.wait_for_reply_allowed(step_id):
             await self.storage.pool.execute(
                 """UPDATE pv_linear_sessions
                    SET status='waiting_reply',current_step_id=$2,current_position=$3,
