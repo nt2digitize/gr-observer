@@ -6,7 +6,7 @@ import os
 
 from dotenv import load_dotenv
 
-from gr_observer.application import Observer
+from gr_observer.application_membership import MembershipObserver
 from gr_observer.config import missing_panel_env
 
 load_dotenv()
@@ -22,4 +22,4 @@ if __name__ == "__main__":
     if missing:
         log.error("Configuração pendente: %s. Painel não iniciado.", ", ".join(missing))
         raise SystemExit(0)
-    asyncio.run(Observer().run())
+    asyncio.run(MembershipObserver().run())
