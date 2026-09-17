@@ -103,6 +103,11 @@ def _event_key(*parts) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
 
+def _is_stale_order(current: int | None, incoming: int | None) -> bool:
+    """Only comparable Telegram sequence numbers may suppress a late update."""
+    return current is not None and incoming is not None and incoming <= current
+
+
 def membership_change_from_update(
     update,
     *,
@@ -242,6 +247,15 @@ class GroupMembershipTracker:
                 )
                 if not inserted:
                     return "duplicate"
+
+                current_order = await conn.fetchval(
+                    """SELECT last_telegram_order FROM pv_group_membership_state
+                       WHERE chat_id=$1 AND user_id=$2 FOR UPDATE""",
+                    change.chat_id,
+                    change.user_id,
+                )
+                if _is_stale_order(current_order, change.telegram_order):
+                    return "stale"
 
                 joined = change.transition == "joined"
                 await conn.execute(
