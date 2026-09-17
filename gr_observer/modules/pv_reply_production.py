@@ -19,6 +19,7 @@ from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
 from ..pv_temperature import PvTemperatureShadow, classify_demand_signal
+from .pv_reply import classify_response, is_human_sender
 from .pv_reply_contacts import PvReplyWithContacts
 
 log = logging.getLogger("gr-observer.pv-production")
@@ -223,10 +224,36 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
             # never a pause, send, retry or change to the established PV journey.
             log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
 
+    async def _linear_opt_out(self, event) -> bool:
+        """Keep opt-out as a global guardrail, never as a conversation branch."""
+        if not linear_flow_enabled() or classify_response(event.raw_text or "") != "opt_out":
+            return False
+        sender = await event.get_sender()
+        if not is_human_sender(sender):
+            return False
+        peer = int(sender.id)
+        if self.me is not None and peer == int(self.me.id):
+            return False
+        await suppress_pv_user(
+            self.storage.pool,
+            peer,
+            suppressed_by=None,
+            reason="lead_opt_out",
+            username_hint=getattr(sender, "username", None),
+        )
+        await self.storage.pool.execute(
+            """UPDATE pv_linear_sessions SET status='stopped',updated_at=NOW()
+               WHERE user_id=$1 AND status<>'stopped'""",
+            peer,
+        )
+        return True
+
     async def handle_event(self, event) -> bool:
         if event.is_private and not event.out and event.sender_id:
             lock = self._accept_locks[int(event.sender_id) % self._LOCK_STRIPES]
             async with lock:
+                if await self._linear_opt_out(event):
+                    return False
                 result = await super().handle_event(event)
                 await self._observe_temperature_shadow(event)
                 await self._observe_response_memory_shadow(event)
@@ -273,9 +300,11 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""
+        reply_delay = max(MIN_WRITING_DELAY_SECONDS, int(self.settings.pv_reply_delay_seconds))
         rows = (
             ("link.preview", "link", POSITION_GAP * 2, "Link da prévia", "{preview_link}", 7),
             ("followup.link", "followup", POSITION_GAP * 2, "Link do follow-up", "{preview_link}", 3),
+            ("reminder.link", "reminder_link", POSITION_GAP, "Reenvio do link", "{preview_link}", reply_delay),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
             # Destination-pair migration owns position 1; the actual destination is position 2.
