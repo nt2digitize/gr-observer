@@ -68,8 +68,9 @@ class UpdateChatParticipantDelete:
 
 
 class FakeMembershipDb:
-    def __init__(self, *, known=True):
+    def __init__(self, *, known=True, preview_chat_id=None):
         self.known = known
+        self.preview_chat_id = preview_chat_id
         self.events = set()
         self.state = {}
 
@@ -88,6 +89,8 @@ class FakeMembershipDb:
     async def fetchval(self, query, *args):
         if "EXISTS(SELECT 1 FROM contact_ledger" in query:
             return self.known
+        if "SELECT EXISTS(" in query and "FROM link_targets" in query:
+            return self.preview_chat_id is not None and int(args[1]) == int(self.preview_chat_id)
         if "INSERT INTO pv_group_membership_events" in query:
             event_key = str(args[0])
             if event_key in self.events:
@@ -248,6 +251,22 @@ class MembershipPersistenceSimulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(db.events)
         self.assertFalse(db.state)
 
+    async def test_known_link_target_marks_preview_group_without_invite_in_update(self):
+        probe = membership_change_from_update(
+            UpdateChannelParticipant(prev=None, new=ChannelParticipant(), qts=10)
+        )
+        db = FakeMembershipDb(preview_chat_id=probe.chat_id)
+        tracker = GroupMembershipTracker(db, preview_link="https://t.me/+PreviewABC")
+
+        self.assertEqual(
+            await tracker.observe(
+                UpdateChannelParticipant(prev=None, new=ChannelParticipant(), qts=10)
+            ),
+            "joined",
+        )
+        row = next(iter(db.state.values()))
+        self.assertTrue(row["preview_group"])
+
 
 class MembershipSafetyContractTests(unittest.TestCase):
     def test_tracker_observe_has_no_sending_surface(self):
@@ -260,6 +279,13 @@ class MembershipSafetyContractTests(unittest.TestCase):
         ddl = DDL.casefold()
         self.assertNotIn("invite_link", ddl)
         self.assertNotIn("actor_id", ddl)
+
+    def test_preview_chat_lookup_reuses_existing_link_targets(self):
+        source = inspect.getsource(GroupMembershipTracker._known_preview_chat)
+        self.assertIn("link_targets", source)
+        self.assertIn("target_chat_id", source)
+        for token in ("INSERT ", "UPDATE ", "DELETE "):
+            self.assertNotIn(token, source.upper())
 
     def test_stale_event_is_recorded_but_cannot_regress_current_state(self):
         source = inspect.getsource(GroupMembershipTracker.observe)
