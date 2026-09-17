@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
+from gr_observer.pv_editor_policy import _EditorDisplayStore
 from gr_observer.pv_message_steps import PvMessageStepStore
 
 ROOT = Path(__file__).resolve().parent
@@ -36,10 +37,46 @@ class PvMultimediaEditorTests(unittest.IsolatedAsyncioTestCase):
         pool = NS(fetchval=AsyncMock(return_value=18))
         store = PvMessageStepStore(pool, NS())
         store._ready = True
-        await store.set_content(18, "novo texto")
+        outcome = await store.set_content(18, "novo texto")
+        self.assertEqual(outcome, "updated")
         sql = pool.fetchval.await_args.args[0]
+        args = pool.fetchval.await_args.args
         self.assertIn("media_source_peer=NULL", sql)
         self.assertIn("media_source_message_id=NULL", sql)
+        self.assertIn("WHERE id=$1", sql)
+        self.assertEqual(args[1], 18)
+        self.assertEqual(args[2], "novo texto")
+        self.assertEqual(args[3], "text")
+
+    async def test_media_only_row_gets_display_label_without_mutating_storage(self):
+        stored = {
+            "id": 21,
+            "content": "",
+            "media_kind": "photo",
+            "block_key": "greeting",
+        }
+        backing = NS(get=AsyncMock(return_value=stored))
+        view = _EditorDisplayStore(backing)
+
+        rendered = await view.get(21)
+
+        self.assertEqual(rendered["content"], "📷 Foto")
+        self.assertEqual(stored["content"], "")
+
+    async def test_text_row_is_not_rewritten_by_display_view(self):
+        stored = {
+            "id": 22,
+            "content": "novo texto",
+            "media_kind": None,
+            "block_key": "greeting",
+        }
+        backing = NS(get=AsyncMock(return_value=stored))
+        view = _EditorDisplayStore(backing)
+
+        rendered = await view.get(22)
+
+        self.assertIs(rendered, stored)
+        self.assertEqual(rendered["content"], "novo texto")
 
     def test_editor_accepts_only_expected_lightweight_media_types(self):
         source = (ROOT / "gr_observer" / "pv_editor_policy.py").read_text(encoding="utf-8")
@@ -52,8 +89,8 @@ class PvMultimediaEditorTests(unittest.IsolatedAsyncioTestCase):
         policy = (ROOT / "gr_observer" / "pv_editor_policy.py").read_text(encoding="utf-8")
         panel = (ROOT / "gr_observer" / "pv_message_panel.py").read_text(encoding="utf-8")
         self.assertIn('button.text = "📎 Conteúdo"', policy)
-        self.assertIn('pvm:text:', panel)
-        self.assertIn('pvmx:text:', panel)
+        self.assertIn("pvm:text:", panel)
+        self.assertIn("pvmx:text:", panel)
 
     def test_editor_keeps_media_in_telegram_not_postgres_binary(self):
         steps = (ROOT / "gr_observer" / "pv_message_steps.py").read_text(encoding="utf-8")
