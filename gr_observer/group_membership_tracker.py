@@ -218,6 +218,22 @@ class GroupMembershipTracker:
             )
         )
 
+    async def _known_preview_chat(self, chat_id: int) -> bool:
+        if not _clean_link(self.preview_link):
+            return False
+        return bool(
+            await self.pool.fetchval(
+                """SELECT EXISTS(
+                     SELECT 1 FROM link_targets
+                     WHERE disposition='active'
+                       AND target_chat_id=$2
+                       AND RTRIM(url,'/')=RTRIM($1,'/')
+                   )""",
+                self.preview_link,
+                int(chat_id),
+            )
+        )
+
     async def observe(self, update) -> str:
         """Persist one raw membership update; never enqueue or send anything."""
         change = membership_change_from_update(update, preview_link=self.preview_link)
@@ -226,6 +242,9 @@ class GroupMembershipTracker:
         await self.ensure_schema()
         if not await self._known_lead(change.user_id):
             return "ignored_unknown_lead"
+        preview_group = change.preview_link_match or await self._known_preview_chat(
+            change.chat_id
+        )
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -241,7 +260,7 @@ class GroupMembershipTracker:
                     change.user_id,
                     change.transition,
                     change.reason,
-                    change.preview_link_match,
+                    preview_group,
                     change.telegram_order,
                     change.event_at,
                 )
@@ -304,7 +323,7 @@ class GroupMembershipTracker:
                     change.transition,
                     change.event_at,
                     change.reason,
-                    change.preview_link_match,
+                    preview_group,
                     change.telegram_order,
                 )
         return "joined" if joined else "left"
