@@ -12,6 +12,7 @@ import logging
 from telethon import events, types
 from telethon.tl.functions.contacts import GetBlockedRequest
 
+from ..group_membership_tracker import GroupMembershipTracker
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
 from ..pv_message_steps import POSITION_GAP
@@ -33,6 +34,12 @@ class PvReplyProduction(PvReplyWithContacts):
         super().__init__(storage, settings)
         self._accept_locks = [asyncio.Lock() for _ in range(self._LOCK_STRIPES)]
         self._native_block_handler = None
+        self.membership_tracker = GroupMembershipTracker(
+            storage.pool,
+            preview_link=settings.pv_preview_link,
+        )
+        self._membership_tracker_ready = False
+        self._membership_handler = None
         self.temperature_shadow = PvTemperatureShadow(storage.pool)
         self._temperature_shadow_ready = False
         self.response_memory_shadow = PvResponseMemoryShadow(
@@ -43,6 +50,27 @@ class PvReplyProduction(PvReplyWithContacts):
 
     async def on_connect(self, client, me) -> None:
         await super().on_connect(client, me)
+        try:
+            await self.membership_tracker.ensure_schema()
+        except Exception as exc:
+            log.warning(
+                "PV membership shadow unavailable erro=%s",
+                type(exc).__name__,
+            )
+            self._membership_tracker_ready = False
+        else:
+            self._membership_tracker_ready = True
+            self._membership_handler = self._on_membership_update
+            client.add_event_handler(
+                self._membership_handler,
+                events.Raw(
+                    types=(
+                        types.UpdateChannelParticipant,
+                        types.UpdateChatParticipantAdd,
+                        types.UpdateChatParticipantDelete,
+                    )
+                ),
+            )
         try:
             await self.temperature_shadow.ensure_schema()
         except Exception as exc:
@@ -84,12 +112,31 @@ class PvReplyProduction(PvReplyWithContacts):
             log.warning("PV restored missing required steps: %s", ",".join(restored))
 
     async def on_disconnect(self) -> None:
+        if self.client is not None and self._membership_handler is not None:
+            self.client.remove_event_handler(self._membership_handler)
+        self._membership_handler = None
+        self._membership_tracker_ready = False
         if self.client is not None and self._native_block_handler is not None:
             self.client.remove_event_handler(self._native_block_handler)
         self._native_block_handler = None
         self._temperature_shadow_ready = False
         self._response_memory_shadow_ready = False
         await super().on_disconnect()
+
+    async def _on_membership_update(self, update) -> None:
+        """Persist a membership fact without creating Telegram work."""
+        if not self._membership_tracker_ready:
+            return
+        try:
+            outcome = await self.membership_tracker.observe(update)
+        except Exception as exc:
+            log.warning(
+                "PV membership shadow skipped erro=%s",
+                type(exc).__name__,
+            )
+            return
+        if outcome in {"joined", "left"}:
+            log.info("PV membership shadow registrou mudança=%s", outcome)
 
     async def _on_native_block_update(self, update) -> None:
         """Mirror a Telegram main-blocklist event into the internal PV kill switch."""
