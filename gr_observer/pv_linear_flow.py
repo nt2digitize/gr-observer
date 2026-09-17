@@ -16,7 +16,7 @@ from decimal import Decimal
 
 from .human_timing import MIN_WRITING_DELAY_SECONDS
 from .pv_message_steps import POSITION_GAP, infer_kind
-from .pv_suppression import is_suppressed, suppress_pv_user
+from .pv_suppression import is_suppressed
 from .modules.pv_reply import display_name, is_human_sender
 
 LINEAR_MIGRATION_VERSION = 4
@@ -428,22 +428,6 @@ class PvLinearRuntimeMixin:
                 event_key=self._event_key(event),
                 already_contact=bool(getattr(sender, "contact", False)),
             )
-
-        raw = (event.raw_text or "").casefold()
-        if any(token in raw for token in ("pare", "parar", "não me mande", "nao me mande")):
-            await suppress_pv_user(
-                self.storage.pool,
-                peer,
-                suppressed_by=None,
-                reason="lead_opt_out",
-                username_hint=getattr(sender, "username", None),
-            )
-            await self.storage.pool.execute(
-                """UPDATE pv_linear_sessions SET status='stopped',updated_at=NOW()
-                   WHERE user_id=$1""",
-                peer,
-            )
-            return False
 
         await self._linear_accept_inbound(peer, int(event.id))
         return False
