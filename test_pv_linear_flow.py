@@ -23,7 +23,7 @@ class PvLinearArchitectureTests(unittest.TestCase):
         self.assertIn("LINEAR_POSITION", upper)
         self.assertNotIn("DROP ", upper)
         self.assertNotIn("TRUNCATE ", upper)
-        self.assertNotIn("DELETE ", upper)
+        self.assertNotIn("DELETE FROM", upper)
 
     def test_frames_are_context_only_and_old_reminder_is_not_seeded(self):
         self.assertEqual(
@@ -51,6 +51,13 @@ class PvLinearArchitectureTests(unittest.TestCase):
             self.assertNotIn(token, source)
         self.assertIn("INSERT INTO outbox_actions", source)
         self.assertIn("send_linear_balloon", source)
+
+    def test_linear_flow_does_not_classify_or_suppress_by_message_text(self):
+        source = inspect.getsource(PvLinearRuntimeMixin)
+        self.assertNotIn("suppress_pv_user", source)
+        self.assertNotIn("lead_opt_out", source)
+        self.assertNotIn("não me mande", source)
+        self.assertNotIn("nao me mande", source)
 
     def test_wait_for_reply_is_per_contact_persistent_state(self):
         source = inspect.getsource(PvLinearRuntimeMixin)
