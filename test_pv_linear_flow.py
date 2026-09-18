@@ -85,10 +85,10 @@ class PvLinearArchitectureTests(unittest.TestCase):
         ):
             self.assertIn(f"async def {action}", source)
 
-    def test_legacy_required_rows_remain_available_for_flag_off_rollback(self):
+    def test_removed_reminder_is_not_restored_after_pr65(self):
         source = inspect.getsource(PvReplyProduction._restore_missing_required_destinations)
-        self.assertIn("reminder.link", source)
-        self.assertIn("reminder_link", source)
+        self.assertNotIn("reminder.link", source)
+        self.assertNotIn("reminder_link", source)
 
     def test_opt_out_survives_as_guardrail_not_progression_engine(self):
         source = inspect.getsource(PvReplyProduction._linear_opt_out)

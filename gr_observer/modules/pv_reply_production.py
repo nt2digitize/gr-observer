@@ -300,11 +300,9 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""
-        reply_delay = max(MIN_WRITING_DELAY_SECONDS, int(self.settings.pv_reply_delay_seconds))
         rows = (
             ("link.preview", "link", POSITION_GAP * 2, "Link da prévia", "{preview_link}", 7),
             ("followup.link", "followup", POSITION_GAP * 2, "Link do follow-up", "{preview_link}", 3),
-            ("reminder.link", "reminder_link", POSITION_GAP, "Reenvio do link", "{preview_link}", reply_delay),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
             # Destination-pair migration owns position 1; the actual destination is position 2.

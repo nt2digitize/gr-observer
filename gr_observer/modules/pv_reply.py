@@ -164,9 +164,6 @@ class PvReplyModule:
         writer.register(self.module_id, "send_link", self.action_send_link)
         writer.register(self.module_id, "send_followup", self.action_send_followup)
         writer.register(
-            self.module_id, "send_reminder_link", self.action_send_reminder_link
-        )
-        writer.register(
             self.module_id, "send_weekly_question", self.action_send_weekly_question
         )
         writer.register(self.module_id, "send_live_optin", self.action_send_live_optin)
@@ -234,10 +231,6 @@ class PvReplyModule:
         live_response_kind = classify_live_response(raw_text)
         choice = classify_two_screens_choice(raw_text)
 
-        # Once the preference question is visible, this branch owns the next
-        # private reply. Ambiguous replies deliberately fall back to one of
-        # the not-yet-sent slots. Explicit opt-out still goes through the
-        # primary PV state machine below and stops all automation.
         if (
             self.photo_flow is not None
             and self.settings.pv_two_screens_enabled
@@ -261,8 +254,6 @@ class PvReplyModule:
                 return False
 
         two_screens_response_kind = classify_two_screens_response(raw_text)
-        # Compatibility for sessions created before the simplified prompt:
-        # a plain "não" must not strand the old awaiting_optin state.
         if self.settings.pv_two_screens_enabled and two_screens_response_kind == "negative":
             two_screens_response_kind = "positive"
         await self.storage.accept_pv_message(
@@ -281,8 +272,6 @@ class PvReplyModule:
             ),
             delay_seconds=self.settings.pv_reply_delay_seconds,
         )
-        # The Radar may still record a probable origin for this same PV. The
-        # ribs do not consume one another's ordinary business events.
         return False
 
     def campaign_text(self, campaign_id: str) -> str:
@@ -431,17 +420,6 @@ class PvReplyModule:
             "reminder": reminder,
             "link": link,
         }
-
-    async def action_send_reminder_link(self, action: dict, effects) -> dict:
-        peer = int(action["payload"]["peer"])
-        if not await self.storage.pv_reminder_link_allowed(peer):
-            return {"sent": False, "reason": "state_changed"}
-        result = await self._send_preview_link(
-            effects,
-            peer,
-            f"{action['action_key']}:send",
-        )
-        return {"sent": True, **result}
 
     async def action_send_weekly_question(self, action: dict, effects) -> dict:
         peer = int(action["payload"]["peer"])
@@ -658,8 +636,6 @@ class PvReplyModule:
         if not media:
             return {"sent": False, "reason": "media_slot_missing", "slot": slot}
 
-        # Isolated unit-test storage has no PostgreSQL pool. Keep the legacy
-        # single-photo contract there; production always has the durable store.
         if self.photo_flow is None:
             result = await effects.forward_message(
                 int(media["source_peer"]),
