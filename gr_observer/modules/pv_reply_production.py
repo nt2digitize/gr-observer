@@ -16,6 +16,7 @@ from ..group_membership_tracker import GroupMembershipTracker
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
 from ..pv_linear_flow import PvLinearRuntimeMixin, linear_flow_enabled
+from ..pv_membership_context import membership_conversation_context
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
@@ -318,7 +319,32 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
         origin_key: str,
         variables: dict,
     ) -> dict:
-        """Keep legacy text delivery untouched; divert only catalogued media rows."""
+        """Attach passive membership context without changing delivery contracts."""
+        linear_send = linear_flow_enabled() and str(origin_key).startswith("pv_reply:linear:")
+        if linear_send:
+            try:
+                membership_context = await membership_conversation_context(
+                    self.storage.pool,
+                    int(peer),
+                )
+            except Exception as exc:
+                log.warning(
+                    "PV membership conversation context skipped erro=%s",
+                    type(exc).__name__,
+                )
+            else:
+                variables = dict(variables)
+                variables["_membership_state"] = membership_context.state
+                variables["_membership_repertoires"] = list(
+                    membership_context.allowed_repertoires
+                )
+                log.info(
+                    "PV linear membership context peer=%s state=%s repertoires=%s",
+                    int(peer),
+                    membership_context.state,
+                    ",".join(membership_context.allowed_repertoires),
+                )
+
         if not has_media(row):
             return await super()._send_row(
                 effects=effects,
@@ -327,6 +353,7 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
                 origin_key=origin_key,
                 variables=variables,
             )
+
         text = self.message_store.render(
             str(row["content"]),
             preview_link=self.settings.pv_preview_link,

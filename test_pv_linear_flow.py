@@ -73,6 +73,34 @@ class PvLinearArchitectureTests(unittest.TestCase):
         with patch.dict(os.environ, {"PV_LINEAR_FLOW_ENABLED": "true"}):
             self.assertTrue(linear_flow_enabled())
 
+    def test_flag_off_keeps_legacy_delegation_paths(self):
+        delegations = {
+            "_run_block": "return await super()._run_block(*args, **kwargs)",
+            "action_auto_queue_two_screens_photo": (
+                "return await super().action_auto_queue_two_screens_photo(action, effects)"
+            ),
+            "action_send_two_screens_photo": (
+                "return await super().action_send_two_screens_photo(action, effects)"
+            ),
+            "action_close_live_recipient": (
+                "return await super().action_close_live_recipient(action, effects)"
+            ),
+            "action_send_message_step": (
+                "return await super().action_send_message_step(action, effects)"
+            ),
+        }
+        for method_name, delegation in delegations.items():
+            source = inspect.getsource(getattr(PvReplyProduction, method_name))
+            self.assertIn("linear_flow_enabled()", source, method_name)
+            self.assertIn(delegation, source, method_name)
+
+        opt_out = inspect.getsource(PvReplyProduction._linear_opt_out)
+        self.assertIn("if not linear_flow_enabled()", opt_out)
+
+        send_row = inspect.getsource(PvReplyProduction._send_row)
+        self.assertIn("linear_send = linear_flow_enabled() and", send_row)
+        self.assertIn("return await super()._send_row(", send_row)
+
     def test_linear_mode_quarantines_legacy_sequencer(self):
         source = inspect.getsource(PvReplyProduction)
         self.assertIn("legacy_flow_disabled", source)
