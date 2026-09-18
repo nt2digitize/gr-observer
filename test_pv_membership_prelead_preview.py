@@ -40,7 +40,15 @@ class FakeDb:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    async def fetchrow(self, query, *args):
+        if "FROM pv_group_membership_state" in query:
+            row = self.state.get((int(args[0]), int(args[1])))
+            return row
+        raise AssertionError(f"fetchrow inesperado: {query}")
+
     async def fetchval(self, query, *args):
+        if "SELECT target_chat_id FROM link_targets" in query:
+            return self.preview_chat_id
         if "FROM link_targets" in query:
             return self.preview_chat_id is not None and int(args[1]) == int(self.preview_chat_id)
         if "EXISTS(SELECT 1 FROM contact_ledger" in query:
@@ -54,10 +62,30 @@ class FakeDb:
         if "SELECT last_telegram_order FROM pv_group_membership_state" in query:
             row = self.state.get((int(args[0]), int(args[1])))
             return None if row is None else row["last_telegram_order"]
+        if "INSERT INTO pv_group_membership_state" in query and "RETURNING status" in query:
+            chat_id, user_id, status, event_at = args
+            key = (int(chat_id), int(user_id))
+            row = self.state.get(key)
+            if row is None:
+                row = {
+                    "status": str(status),
+                    "preview_group": True,
+                    "last_telegram_order": None,
+                    "event_at": event_at,
+                    "reason": "current_membership_reconcile",
+                }
+                self.state[key] = row
+            else:
+                row["preview_group"] = True
+            return row["status"]
         raise AssertionError(f"fetchval inesperado: {query}")
 
     async def execute(self, query, *args):
         if "CREATE TABLE IF NOT EXISTS" in query:
+            return "OK"
+        if "SET preview_group=TRUE" in query:
+            row = self.state[(int(args[0]), int(args[1]))]
+            row["preview_group"] = True
             return "OK"
         if "INSERT INTO pv_group_membership_state" not in query:
             return "OK"
@@ -70,6 +98,21 @@ class FakeDb:
             "reason": reason,
         }
         return "OK"
+
+
+class FakePermissions:
+    def __init__(self, *, has_left=False):
+        self.has_left = has_left
+
+
+class FakeClient:
+    def __init__(self, *, has_left=False):
+        self.has_left = has_left
+        self.calls = []
+
+    async def get_permissions(self, chat_id, user_id):
+        self.calls.append((int(chat_id), int(user_id)))
+        return FakePermissions(has_left=self.has_left)
 
 
 class PreviewMembershipBeforeLeadTests(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +140,34 @@ class PreviewMembershipBeforeLeadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome, "ignored_unknown_lead")
         self.assertFalse(db.events)
         self.assertFalse(db.state)
+
+    async def test_missing_state_is_reconciled_from_current_telegram_membership(self):
+        db = FakeDb(preview_chat_id=-100123)
+        client = FakeClient(has_left=False)
+        tracker = GroupMembershipTracker(db, preview_link="https://t.me/+Preview")
+
+        outcome = await tracker.reconcile_current(client, 456)
+
+        self.assertEqual(outcome, "joined")
+        self.assertEqual(client.calls, [(-100123, 456)])
+        self.assertEqual(db.state[(-100123, 456)]["status"], "joined")
+        self.assertTrue(db.state[(-100123, 456)]["preview_group"])
+
+    async def test_existing_state_avoids_extra_telegram_membership_call(self):
+        db = FakeDb(preview_chat_id=-100123)
+        db.state[(-100123, 456)] = {
+            "status": "joined",
+            "preview_group": False,
+            "last_telegram_order": 4,
+        }
+        client = FakeClient(has_left=True)
+        tracker = GroupMembershipTracker(db, preview_link="https://t.me/+Preview")
+
+        outcome = await tracker.reconcile_current(client, 456)
+
+        self.assertEqual(outcome, "joined")
+        self.assertFalse(client.calls)
+        self.assertTrue(db.state[(-100123, 456)]["preview_group"])
 
 
 if __name__ == "__main__":
