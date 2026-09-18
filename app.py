@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from gr_observer.application import Observer
 from gr_observer.config import missing_panel_env
+from gr_observer.pv_linear_test_reset import apply_linear_test_resets
 
 load_dotenv()
 logging.basicConfig(
@@ -22,4 +23,5 @@ if __name__ == "__main__":
     if missing:
         log.error("Configuração pendente: %s. Painel não iniciado.", ", ".join(missing))
         raise SystemExit(0)
+    asyncio.run(apply_linear_test_resets())
     asyncio.run(Observer().run())
