@@ -62,7 +62,6 @@ BLOCK_ORDER = (
     "greeting",
     "link",
     "followup",
-    "reminder_link",
     "weekly",
     "live_optin",
     "live_invite",
@@ -83,7 +82,6 @@ BLOCK_LABELS = {
     "greeting": "Abertura",
     "link": "Convite e prévia",
     "followup": "Follow-up",
-    "reminder_link": "Reenvio de link",
     "weekly": "Sequência semanal",
     "live_optin": "Opt-in de live",
     "live_invite": "Convite de live",
@@ -243,15 +241,6 @@ def _baseline(settings) -> list[dict]:
             label="Link do follow-up",
             content="{preview_link}",
             median=3,
-        ),
-        dict(
-            step_key="reminder.link",
-            block_key="reminder_link",
-            branch_key=None,
-            position=POSITION_GAP,
-            label="Reenvio do link",
-            content="{preview_link}",
-            median=reply_delay,
         ),
         dict(
             step_key="weekly.question",
@@ -558,6 +547,7 @@ class PvMessageStepStore:
         )
 
     async def set_content(self, step_id: int, content: str) -> str:
+        """Replace a balloon with text/link while preserving its identity and order."""
         await self.ensure_ready()
         value = (content or "").strip()
         if not value:
@@ -565,11 +555,38 @@ class PvMessageStepStore:
             return "deleted" if deleted else "missing"
         updated = await self.pool.fetchval(
             """UPDATE pv_message_steps
-               SET content=$2,kind=$3,updated_at=NOW()
+               SET content=$2,kind=$3,media_source_peer=NULL,
+                   media_source_message_id=NULL,media_kind=NULL,updated_at=NOW()
                WHERE id=$1 RETURNING id""",
             int(step_id),
             value,
             infer_kind(value),
+        )
+        return "updated" if updated else "missing"
+
+    async def set_payload(
+        self,
+        step_id: int,
+        content: str,
+        *,
+        media_source_peer: int,
+        media_source_message_id: int,
+        media_kind: str,
+    ) -> str:
+        """Replace content in place with media plus an optional companion text."""
+        await self.ensure_ready()
+        value = (content or "").strip()
+        updated = await self.pool.fetchval(
+            """UPDATE pv_message_steps
+               SET content=$2,kind=$3,media_source_peer=$4,
+                   media_source_message_id=$5,media_kind=$6,updated_at=NOW()
+               WHERE id=$1 RETURNING id""",
+            int(step_id),
+            value,
+            infer_kind(value),
+            int(media_source_peer),
+            int(media_source_message_id),
+            str(media_kind),
         )
         return "updated" if updated else "missing"
 
@@ -622,10 +639,14 @@ class PvMessageStepStore:
         median_seconds: int,
         *,
         label: str = "Nova fala",
+        media_source_peer: int | None = None,
+        media_source_message_id: int | None = None,
+        media_kind: str | None = None,
     ):
         await self.ensure_ready()
         value = (content or "").strip()
-        if not value:
+        has_media = media_source_peer is not None and media_source_message_id is not None
+        if not value and not has_media:
             raise ValueError("fala vazia")
         median = int(median_seconds)
         if median < 0 or median > MAX_MEDIAN_SECONDS:
@@ -666,8 +687,9 @@ class PvMessageStepStore:
                 return await conn.fetchrow(
                     """INSERT INTO pv_message_steps(
                        step_key,block_key,branch_key,position,label,content,kind,
-                       median_delay_seconds,variant_root,built_in)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,FALSE,FALSE)
+                       median_delay_seconds,variant_root,built_in,
+                       media_source_peer,media_source_message_id,media_kind)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,FALSE,FALSE,$9,$10,$11)
                        RETURNING *""",
                     step_key,
                     parent["block_key"],
@@ -677,6 +699,9 @@ class PvMessageStepStore:
                     value,
                     infer_kind(value),
                     median,
+                    int(media_source_peer) if media_source_peer is not None else None,
+                    int(media_source_message_id) if media_source_message_id is not None else None,
+                    str(media_kind) if media_kind is not None else None,
                 )
 
     def render(

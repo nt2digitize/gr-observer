@@ -13,6 +13,7 @@ from telethon import events, types
 from telethon.tl.functions.contacts import GetBlockedRequest
 
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
+from ..pv_balloon_sender import has_media, send_media_balloon
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
@@ -211,6 +212,42 @@ class PvReplyProduction(PvReplyWithContacts):
         result = await super().handle_event(event)
         await self._observe_response_memory_shadow(event)
         return result
+
+    async def _send_row(
+        self,
+        *,
+        effects,
+        peer: int,
+        row,
+        origin_key: str,
+        variables: dict,
+    ) -> dict:
+        """Keep legacy text delivery untouched; divert only catalogued media rows."""
+        if not has_media(row):
+            return await super()._send_row(
+                effects=effects,
+                peer=peer,
+                row=row,
+                origin_key=origin_key,
+                variables=variables,
+            )
+        text = self.message_store.render(
+            str(row["content"]),
+            preview_link=self.settings.pv_preview_link,
+            live_link=str(variables.get("live_link") or ""),
+        ).strip()
+        if text:
+            _, _, typing = self._human_plan(row, origin_key, text)
+            await self._show_typing(effects, peer, typing)
+        effect_key = f"{origin_key}:message:{row['id']}"
+        result = await send_media_balloon(
+            effects=effects,
+            peer=peer,
+            row=row,
+            text=text,
+            effect_key=effect_key,
+        )
+        return {"sent": True, "step_id": int(row["id"]), **result}
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""

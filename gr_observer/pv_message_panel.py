@@ -35,10 +35,6 @@ PHASE_CONTEXT = {
         "Retomar quem recebeu a prévia sem travar a fila global.",
         "Entra após a prévia conforme a cadência persistida. Depois continua a jornada.",
     ),
-    "reminder_link": (
-        "Reapresentar o destino quando a resposta indicar que o acesso ainda é necessário.",
-        "É um reenvio contextual do link, sem reiniciar a jornada.",
-    ),
     "weekly": (
         "Reativar contato antigo com contexto suficiente para retomar a conversa.",
         "Entra no ciclo semanal persistido e pode reconduzir para a prévia.",

@@ -14,7 +14,6 @@ from telethon import functions, types
 from .modules.pv_reply import (
     LIVE_REMARKETING_DELAY_SECONDS,
     TWO_SCREENS_PHOTO_DELAY_RANGE_SECONDS,
-    classify_response,
     stable_delay_seconds as legacy_stable_delay,
 )
 from .pv_message_steps import has_link, pre_send_wait_seconds, stable_delay_seconds
@@ -35,7 +34,6 @@ class PvMessageRuntimeMixin:
             "send_greeting": self.action_send_greeting,
             "send_link": self.action_send_link,
             "send_followup": self.action_send_followup,
-            "send_reminder_link": self.action_send_reminder_link,
             "send_weekly_question": self.action_send_weekly_question,
             "send_live_optin": self.action_send_live_optin,
             "send_live_invite": self.action_send_live_invite,
@@ -70,17 +68,6 @@ class PvMessageRuntimeMixin:
         await self._retime_pending_action(
             f"pv_reply:link:telegram-user:{event_key}", "link"
         )
-        if classify_response(event.raw_text or "") == "negative":
-            cycle = await self.storage.pool.fetchval(
-                """SELECT weekly_cycle FROM pv_reply_contacts
-                   WHERE user_id=$1 AND stage='weekly'""",
-                peer,
-            )
-            if cycle is not None:
-                await self._retime_pending_action(
-                    f"pv_reply:conditional-link:{peer}:weekly:{int(cycle)}",
-                    "reminder_link",
-                )
         question_block = (
             "two_screens_preference"
             if self.settings.pv_two_screens_enabled
@@ -639,18 +626,6 @@ class PvMessageRuntimeMixin:
             block_key="followup",
             continuation="followup",
             context={"peer": peer, "cycle": cycle},
-        )
-
-    async def action_send_reminder_link(self, action: dict, effects) -> dict:
-        peer = int(action["payload"]["peer"])
-        if not await self.storage.pv_reminder_link_allowed(peer):
-            return {"sent": False, "reason": "state_changed"}
-        return await self._run_block(
-            action=action,
-            effects=effects,
-            block_key="reminder_link",
-            continuation="none",
-            context={"peer": peer},
         )
 
     async def action_send_weekly_question(self, action: dict, effects) -> dict:

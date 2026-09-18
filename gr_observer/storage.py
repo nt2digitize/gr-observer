@@ -507,21 +507,7 @@ class Storage:
                         user_id,
                     )
                     return "completed"
-                if contact["stage"] != "weekly" or response_kind != "negative":
-                    return "ignored"
-
-                cycle = int(contact["weekly_cycle"])
-                await conn.execute(
-                    """INSERT INTO outbox_actions(
-                       action_key,module_id,action_type,payload,available_at)
-                       VALUES($1,'pv_reply','send_reminder_link',$2::jsonb,
-                       NOW()+($3::double precision*INTERVAL '1 second'))
-                       ON CONFLICT(action_key) DO NOTHING""",
-                    f"pv_reply:conditional-link:{user_id}:weekly:{cycle}",
-                    _json({"peer": user_id, "campaign_id": "pv.preview_link"}),
-                    delay_seconds,
-                )
-                return "conditional_link_queued"
+                return "ignored"
 
     async def two_screens_action_allowed(self, user_id: int, status: str) -> bool:
         return bool(await self.pool.fetchval(
@@ -755,15 +741,6 @@ class Storage:
                 user_id,
                 stage,
                 cycle,
-            )
-        )
-
-    async def pv_reminder_link_allowed(self, user_id: int) -> bool:
-        return bool(
-            await self.pool.fetchval(
-                """SELECT EXISTS(SELECT 1 FROM pv_reply_contacts
-                   WHERE user_id=$1 AND stage IN ('following_up','weekly'))""",
-                user_id,
             )
         )
 
