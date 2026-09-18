@@ -8,6 +8,7 @@ from telethon import Button
 
 from .catalog import match_command
 from .human_timing import MIN_WRITING_DELAY_SECONDS, minimum_human_delay_seconds
+from .pv_linear_panel import PvLinearPanelMixin
 from .pv_message_panel import PvMessageEditorPanelMixin as _BasePvMessageEditorPanelMixin
 from .pv_message_steps import MAX_MEDIAN_SECONDS
 
@@ -305,6 +306,7 @@ class PvEditorPolicyMixin:
 
 
 class PvMessageEditorPanel(
+    PvLinearPanelMixin,
     PvEditorPolicyMixin,
     _BasePvMessageEditorPanelMixin,
 ):
