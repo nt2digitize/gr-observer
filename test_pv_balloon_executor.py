@@ -63,6 +63,17 @@ class PvBalloonExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if not has_media(row):", source)
         self.assertIn("return await super()._send_row(", source)
 
+    def test_production_media_rows_keep_existing_return_contract(self):
+        source = (ROOT / "gr_observer" / "modules" / "pv_reply_production.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'return {"sent": True, "step_id": int(row["id"]), **result}',
+            source,
+        )
+        self.assertNotIn('"membership_state":', source)
+        self.assertNotIn('"membership_repertoires":', source)
+
     def test_helper_does_not_mutate_telegram_directly(self):
         source = (ROOT / "gr_observer" / "pv_balloon_sender.py").read_text(encoding="utf-8")
         self.assertNotIn("TelegramClient", source)
