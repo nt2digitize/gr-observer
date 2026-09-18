@@ -347,20 +347,13 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
                 )
 
         if not has_media(row):
-            result = await super()._send_row(
+            return await super()._send_row(
                 effects=effects,
                 peer=peer,
                 row=row,
                 origin_key=origin_key,
                 variables=variables,
             )
-            if membership_context is None:
-                return result
-            return {
-                **result,
-                "membership_state": membership_context.state,
-                "membership_repertoires": list(membership_context.allowed_repertoires),
-            }
 
         text = self.message_store.render(
             str(row["content"]),
