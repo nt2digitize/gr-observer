@@ -1,161 +1,143 @@
-# Plano Mestre — Atendimento PV / Rollout Fino
+# Plano Mestre — Atendimento PV
 
 - **Projeto:** `nt2digitize/gr-observer`
-- **Documento vivo:** atualizar após cada promoção relevante
 - **Data-base:** 2026-09-17
-- **Produção:** `release/pr16-production` em `0d87a6d12113696a5dc2d7f2f20bb272c5d7c493`
-- **Objetivo:** migrar o Atendimento PV para uma única conversa linear por lead, preservando a arquitetura de uma sessão USER, uma Outbox e um Writer.
+- **Produção:** `release/pr16-production` @ `2a2e3cdf7194e292776bf44f1c7174fa905b9b40`
+- **Railway:** `radar-gr-observer` em `SUCCESS` no mesmo commit
+- **Auto Deploy Railway:** desligado; merge não significa deploy
+- **Objetivo:** uma única conversa linear por lead, mantendo uma sessão USER, uma Outbox e um Writer.
 
-## 1. Autoridade de fluxo
+## 1. Autoridade
 
-A conversa linear é o único chefe futuro da progressão do PV.
+A conversa linear será a única autoridade de progressão do PV.
 
-- quadros/fases são somente contexto visual;
-- cada balão define conteúdo, espera antes do envio e se aguarda nova mensagem humana;
-- Duas Telas, Live, membership e demais recursos são capacidades/fatos, não máquinas paralelas de jornada;
-- opt-out, supressão, pacing, FloodWait e idempotência permanecem guardrails globais;
-- `docs/PV-LINEAR-AUTHORITY.md` define o contrato completo de cutover e aposentadoria do legado.
+- quadros/fases = contexto visual;
+- balão = conteúdo + tempo antes do envio + esperar resposta sim/não;
+- espera humana = somente a lane daquele lead;
+- Duas Telas e Live = capacidades chamadas pela linha, não motores paralelos;
+- membership = fato passivo;
+- opt-out, supressão, pacing, FloodWait e idempotência = guardrails globais.
 
-## 2. Invariantes obrigatórios
+Contrato detalhado: `docs/PV-LINEAR-AUTHORITY.md`.
 
-- uma única sessão Telegram USER;
-- um único `Observer.user_runtime`;
-- uma única Outbox persistente;
-- um único `SafeOutboxWriter`;
-- um único `TrafficGovernor` global;
+## 2. Invariantes
+
+- uma sessão Telegram USER;
+- um `Observer.user_runtime`;
+- uma Outbox;
+- um `SafeOutboxWriter`;
+- um `TrafficGovernor` global;
 - `pv_reply` como uma única costela;
-- uma lane lógica por `user_id`;
-- nenhuma espera humana segura Writer ou fila global;
-- toda mutação USER segue `módulo -> outbox_actions -> SafeOutboxWriter -> SafeTelegramEffects -> Telegram`;
-- banco somente aditivo durante rollout;
-- nenhum replay cego de efeito externo ambíguo;
-- rollback por código/flag sem apagar histórico.
+- nenhuma espera humana bloqueia Writer/fila global;
+- mutação USER somente por `módulo -> outbox_actions -> Writer -> Effects -> Telegram`;
+- efeito externo idempotente;
+- banco aditivo e rollback sem apagar histórico;
+- sem segundo client, Writer, Outbox, worker, fila ou serviço.
 
-## 3. Decisão de produto vigente
+## 3. Estado das PRs
 
-Nesta etapa:
+### #65 — `reminder_link`
 
-- sem IA, LLM, embeddings ou geração livre;
-- respostas futuras serão determinísticas e aprovadas;
-- objetivo principal do PV é conduzir ao grupo e manter comunicação mínima útil;
-- registrar envio efetivo do link e detectar entrada/saída do grupo;
-- Duas Telas preserva fotos pré-cadastradas e mecânica de escolha, mas perde autoridade própria de progressão;
-- Live preserva evento/destino/consentimento, mas não cria jornada paralela;
-- videochamada será tratada por resposta determinística aprovada, não por negociação automática.
+**MERGEADA E EM PRODUÇÃO.**
 
-## 4. PRs atuais
+Commit: `2a2e3cdf7194e292776bf44f1c7174fa905b9b40`.
 
-### #65 — remover `reminder_link` legado
-
-Objetivo: eliminar o reenvio condicional standalone de link sem apagar histórico de banco.
-
-Ordem prevista: primeira mudança funcional a ser promovida, após gate explícito de produção.
+Remove o reenvio condicional standalone. Dados históricos permanecem. O runtime pós-#65 não deve recriar `reminder.link`.
 
 ### #66 — conversa linear
 
-Objetivo: motor único de conversa em linha.
+**BANCADA PRONTA SOBRE A PRODUÇÃO PÓS-#65.**
 
-Propriedades:
+Head atual: `b86b66e469ec57ffc6071c0b5e7733c9df63437f`.
 
+- mergeável;
+- CI verde;
 - `PV_LINEAR_FLOW_ENABLED` OFF por padrão;
 - schema aditivo;
-- ordem global de balões;
-- texto/link/mídia do Telegram;
-- espera antes do envio persistida;
-- espera por resposta somente na lane da pessoa;
-- enquanto ADR-004 estiver vigente, nenhuma espera anterior ao link inicial pode impedir a entrega do link;
-- quando a flag estiver ON, progressões legadas ficam quarentenadas para não existir dois chefes;
-- quando OFF, o legado continua disponível para rollback;
-- opt-out continua guardrail global.
+- uma linha global de balões;
+- quadros somente visuais;
+- texto/link/mídia Telegram;
+- espera por resposta por lane;
+- ADR-004 impede espera antes do link inicial;
+- opt-out permanece global;
+- quando a flag está ON, sequenciadores legados ficam em quarentena;
+- quando OFF, o runtime atual permanece disponível para rollback;
+- não restaura `reminder.link` removido pela #65.
 
-A flag não deve ser ligada em produção até Duas Telas/Live e demais capacidades necessárias à homologação terem sido reincorporadas sob autoridade da linha.
+A flag NÃO deve ser ativada ainda. Duas Telas/Live precisam voltar como capacidades controladas pela linha antes do cutover real.
 
 ### #67 — membership passivo
 
-Objetivo: observar entrada/saída/reentrada de leads conhecidos sem enviar nada.
+**REANCORADA SOBRE A PRODUÇÃO PÓS-#65.**
 
-Propriedades:
+Head atual: `4623e115280b9e6cd3d397cc4967051799a4c1e4`.
 
-- mesmo cliente USER existente;
-- nenhum Writer/Outbox/worker novo;
-- persiste somente fatos mínimos: usuário, grupo, transição, razão, ordem, timestamps e se o convite observado correspondeu ao preview;
-- não persiste o link privado bruto nem identidade do ator;
-- eventos duplicados são idempotentes;
-- evento Telegram atrasado pode ficar no histórico, mas não regressa o estado atual;
-- desconhecidos não são persistidos.
+- mergeável;
+- CI verde;
+- mesmo cliente USER;
+- zero envio Telegram;
+- sem Writer/Outbox/worker novo;
+- somente leads conhecidos;
+- join/left/rejoin persistidos;
+- duplicidade idempotente;
+- evento atrasado não regressa estado;
+- convite privado bruto e identidade do ator não são persistidos;
+- grupo de prévia pode ser reconhecido por invite presente ou `link_targets.target_chat_id` já conhecido.
 
-Limite: #67 ainda não prova sozinho que um lead entrou especificamente pelo link enviado no PV quando o Telegram não informa o convite; a correlação `link_sent_at -> membership` permanece etapa separada.
+### #68 — fatos de entrega do link
 
-### #62 — este plano mestre
+**EMPILHADA SOBRE #66.**
 
-Somente documentação. Deve permanecer alinhado ao código e aos ADRs vigentes.
+Objetivo: ler `link_sent_at` do journal `telegram_effects` somente após efeito `succeeded`, sem criar nova fonte de verdade.
 
-### #63 — especificação operacional de grupos
+- read-only;
+- nenhuma tabela/coluna nova;
+- nenhum worker/polling/chamada Telegram;
+- correlaciona com `link_targets.target_chat_id` quando disponível.
 
-Permanece separada do motor de PV e subordinada a ADR-005/006.
+## 4. Legado encerrado
 
-## 5. Pilha antiga encerrada
+PRs #40 e #56–#61 permanecem encerradas como superadas, com histórico preservado.
 
-Foram encerradas como superadas, preservando branches e histórico:
+Código/ideia antiga só pode voltar reconstruída sobre a arquitetura atual.
 
-- #40 MiniLearn experimental;
-- #56 Entrada antiga;
-- #57 Homenagem antiga;
-- #58 Eventos da pilha antiga;
-- #59 Remarketing antigo;
-- #60 Conversa Livre;
-- #61 Contextos/Memória.
+## 5. Próxima sequência
 
-Ideias úteis não autorizam promoção de código antigo. Qualquer reaproveitamento deve ser reconstruído sobre a arquitetura atual.
+1. promover #66 somente com novo CTA;
+2. deploy manual do commit correto no Railway, porque Auto Deploy está desligado;
+3. manter `PV_LINEAR_FLOW_ENABLED=OFF`;
+4. conferir logs e arquitetura;
+5. depois promover #67 em shadow/passivo;
+6. depois #68, se ainda fizer sentido separada após integração;
+7. reincorporar Duas Telas como capacidade da linha;
+8. reincorporar Live como capacidade/evento da linha;
+9. adicionar variantes/respostas determinísticas sem segundo motor;
+10. homologar cutover virtual e só então pedir ativação controlada da linha.
 
-## 6. Próximas fases de bancada
+## 6. Protocolo de promoção
 
-1. deixar #65, #66 e #67 tecnicamente verdes e com diffs estritos;
-2. registrar `link_sent_at` somente após sucesso real do efeito de envio, reutilizando fonte de verdade existente quando possível;
-3. correlacionar membership com o destino conhecido sem persistir convite privado bruto;
-4. transformar Duas Telas em capacidade chamada pela linha, preservando fotos/slots/proteção de repetição;
-5. transformar Live em capacidade/evento chamado pela linha;
-6. adicionar respostas determinísticas e variantes aprovadas sem criar segundo motor;
-7. testar cutover virtual: backlog legado, restart, duplicidade, out-of-order, supressão, duas lanes e rollback por flag;
-8. somente depois pedir autorização para merge/deploy.
+Para cada camada:
 
-## 7. Protocolo de promoção
+`CI verde -> PR mergeável -> CTA -> merge -> Deploy Latest Commit no Railway -> confirmar commit -> SUCCESS -> logs -> próxima camada`.
 
-Para cada mudança em produção:
+Sem CTA novo, não:
 
-1. produção atual confirmada;
-2. diff exclusivo do escopo;
-3. CI verde;
-4. PR mergeável;
-5. risco e rollback descritos;
-6. CTA explícito do operador;
-7. merge isolado;
-8. CTA separado para deploy quando aplicável;
-9. deployment SUCCESS;
-10. logs e arquitetura conferidos;
-11. teste manual controlado quando autorizado;
-12. somente então próxima camada.
+- mergear/deployar;
+- ativar flag;
+- alterar variável/segredo;
+- regenerar sessão;
+- fazer migração destrutiva;
+- executar teste Telegram real;
+- criar segundo runtime/client/Writer/Outbox/fila/serviço.
 
-## 8. Proibições durante bancada
+## 7. Critério final
 
-Sem novo CTA não executar:
+A migração termina quando:
 
-- merge/deploy;
-- ativação de flag em produção;
-- alteração de variável/segredo;
-- rotação de sessão/API/token;
-- migração destrutiva;
-- teste real que envie, entre, saia, adicione contato ou altere Telegram;
-- segunda sessão/client/Outbox/Writer/fila/serviço.
-
-## 9. Critério final de arquitetura
-
-A migração PV estará concluída quando:
-
-- a linha for a única autoridade de progressão;
-- regras antigas não decidirem próximo passo;
-- Duas Telas e Live forem capacidades chamadas pela linha;
-- membership for somente fato;
-- opt-out e guardrails continuarem independentes;
-- legado substituído puder ser removido sem perda funcional;
-- uma sessão USER, uma Outbox e um Writer permanecerem comprovados por CI.
+- somente a linha escolhe o próximo balão;
+- regras antigas não avançam jornada;
+- Duas Telas/Live são capacidades;
+- membership é somente fato;
+- opt-out e guardrails continuam independentes;
+- legado substituído pode ser removido;
+- CI comprova uma sessão USER, uma Outbox e um Writer.
