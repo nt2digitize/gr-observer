@@ -24,7 +24,6 @@ FRESH_HUMAN_TTL_SECONDS = 300
 # inbound-human branches of Storage.accept_pv_message. This avoids a second
 # write/race merely to decorate an already-persisted action.
 HUMAN_ORIGIN_PREFIXES: dict[tuple[str, str], str] = {
-    ("pv_reply", "send_reminder_link"): "pv_reply:conditional-link:",
     ("pv_reply", "send_live_link"): "pv_reply:live-link:",
 }
 
@@ -35,7 +34,6 @@ ACTION_PRIORITY: dict[tuple[str, str], int] = {
     ("pv_reply", "send_two_screens_question"): P0_LIVE_HUMAN,
     ("pv_reply", "send_two_screens_retry"): P0_LIVE_HUMAN,
     # Conditional P0 actions fall back here after the human-recent window.
-    ("pv_reply", "send_reminder_link"): P2_NORMAL,
     ("pv_reply", "send_live_link"): P2_NORMAL,
     # A human is actively waiting in a group, or a PV flow is continuing live.
     ("group_reply", "send_group_reply"): P1_HUMAN_REACTIVE,
