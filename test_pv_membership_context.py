@@ -1,6 +1,7 @@
 import inspect
 import unittest
 
+from gr_observer.modules.pv_reply_production import PvReplyProduction
 from gr_observer.pv_membership_context import (
     BEFORE_JOIN,
     JOINED,
@@ -67,6 +68,19 @@ class MembershipConversationContextSafetyTests(unittest.TestCase):
             "NEXT_STEP",
             "PV_LINEAR_SESSIONS",
             "SEND_MESSAGE",
+        ):
+            self.assertNotIn(token, source)
+
+    def test_send_hook_only_attaches_context_and_does_not_advance_lane(self):
+        source = inspect.getsource(PvReplyProduction._send_row)
+        self.assertIn("membership_conversation_context", source)
+        self.assertIn("_membership_state", source)
+        self.assertIn("_membership_repertoires", source)
+        for token in (
+            "next_step",
+            "pv_linear_sessions",
+            "outbox_actions",
+            "_queue_linear_step",
         ):
             self.assertNotIn(token, source)
 
