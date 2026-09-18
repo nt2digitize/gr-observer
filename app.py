@@ -18,14 +18,10 @@ logging.basicConfig(
 log = logging.getLogger("gr-observer")
 
 
-async def _run() -> None:
-    await apply_linear_test_resets()
-    await Observer().run()
-
-
 if __name__ == "__main__":
     missing = missing_panel_env()
     if missing:
         log.error("Configuração pendente: %s. Painel não iniciado.", ", ".join(missing))
         raise SystemExit(0)
-    asyncio.run(_run())
+    asyncio.run(apply_linear_test_resets())
+    asyncio.run(Observer().run())
