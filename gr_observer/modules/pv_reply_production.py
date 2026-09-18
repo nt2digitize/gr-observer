@@ -50,6 +50,7 @@ class PvReplyProduction(
         )
         self._membership_tracker_ready = False
         self._membership_handler = None
+        self._membership_reconcile_attempted: set[int] = set()
         self.temperature_shadow = PvTemperatureShadow(storage.pool)
         self._temperature_shadow_ready = False
         self.response_memory_shadow = PvResponseMemoryShadow(
@@ -139,6 +140,7 @@ class PvReplyProduction(
             self.client.remove_event_handler(self._membership_handler)
         self._membership_handler = None
         self._membership_tracker_ready = False
+        self._membership_reconcile_attempted.clear()
         if self.client is not None and self._native_block_handler is not None:
             self.client.remove_event_handler(self._native_block_handler)
         self._native_block_handler = None
@@ -329,6 +331,34 @@ class PvReplyProduction(
                     type(exc).__name__,
                 )
             else:
+                if (
+                    membership_context.state == "before_join"
+                    and self.client is not None
+                    and int(peer) not in self._membership_reconcile_attempted
+                ):
+                    self._membership_reconcile_attempted.add(int(peer))
+                    try:
+                        outcome = await self.membership_tracker.reconcile_current(
+                            self.client,
+                            int(peer),
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "PV membership current reconciliation skipped peer=%s erro=%s",
+                            int(peer),
+                            type(exc).__name__,
+                        )
+                    else:
+                        if outcome in {"joined", "left"}:
+                            membership_context = await membership_conversation_context(
+                                self.storage.pool,
+                                int(peer),
+                            )
+                            log.info(
+                                "PV membership current reconciliation peer=%s outcome=%s",
+                                int(peer),
+                                outcome,
+                            )
                 variables = dict(variables)
                 variables["_membership_state"] = membership_context.state
                 variables["_membership_repertoires"] = list(
