@@ -8,6 +8,7 @@ Outbox and single Writer.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import os
@@ -89,7 +90,7 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def linear_flow_enabled() -> bool:
+def _linear_flag_enabled() -> bool:
     return os.getenv("PV_LINEAR_FLOW_ENABLED", "0").strip().casefold() in {
         "1",
         "true",
@@ -97,6 +98,84 @@ def linear_flow_enabled() -> bool:
         "on",
         "sim",
     }
+
+
+def _linear_test_scope() -> frozenset[int] | None:
+    """Optional production-test allowlist; configured values fail closed if invalid."""
+    raw = os.getenv("PV_LINEAR_TEST_USER_IDS")
+    if raw is None or not raw.strip():
+        return None
+    values: set[int] = set()
+    normalized = raw.replace(";", ",").replace(" ", ",")
+    for token in normalized.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            values.add(value)
+    return frozenset(values)
+
+
+def _linear_peer_from_caller() -> int | None:
+    """Resolve peer from existing runtime call shapes; unknown shapes stay disabled."""
+    frame = inspect.currentframe()
+    caller = None
+    try:
+        if frame is not None and frame.f_back is not None:
+            caller = frame.f_back.f_back
+        if caller is None:
+            return None
+        local = caller.f_locals
+        candidates = [local.get("peer")]
+
+        action = local.get("action")
+        if isinstance(action, dict):
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                candidates.append(payload.get("peer"))
+
+        kwargs = local.get("kwargs")
+        if isinstance(kwargs, dict):
+            nested_action = kwargs.get("action")
+            if isinstance(nested_action, dict):
+                payload = nested_action.get("payload") or {}
+                if isinstance(payload, dict):
+                    candidates.append(payload.get("peer"))
+
+        event = local.get("event")
+        if event is not None:
+            candidates.append(getattr(event, "sender_id", None))
+
+        for candidate in candidates:
+            try:
+                value = int(candidate or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+    finally:
+        del caller
+        del frame
+
+
+def linear_flow_enabled(peer: int | None = None) -> bool:
+    """Enable linear PV globally or, during homologation, only for scoped user IDs."""
+    if not _linear_flag_enabled():
+        return False
+    scope = _linear_test_scope()
+    if scope is None:
+        return True
+    resolved_peer = peer if peer is not None else _linear_peer_from_caller()
+    try:
+        resolved_peer = int(resolved_peer or 0)
+    except (TypeError, ValueError):
+        return False
+    return resolved_peer > 0 and resolved_peer in scope
 
 
 class PvLinearConversationStore:
