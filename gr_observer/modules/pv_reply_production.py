@@ -16,6 +16,7 @@ from ..group_membership_tracker import GroupMembershipTracker
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
 from ..pv_linear_flow import PvLinearRuntimeMixin, linear_flow_enabled
+from ..pv_intent_variant_runtime import PvIntentVariantRuntimeMixin
 from ..pv_membership_context import membership_conversation_context
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
@@ -27,7 +28,11 @@ from .pv_reply_contacts import PvReplyWithContacts
 log = logging.getLogger("gr-observer.pv-production")
 
 
-class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
+class PvReplyProduction(
+    PvLinearRuntimeMixin,
+    PvIntentVariantRuntimeMixin,
+    PvReplyWithContacts,
+):
     """Production PV rib with per-contact ordering and stale-step protection."""
 
     _LOCK_STRIPES = 256
