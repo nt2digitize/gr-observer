@@ -1,7 +1,12 @@
 import inspect
+import os
 import unittest
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, patch
 
+from gr_observer.modules.pv_reply_production import PvReplyProduction
 from gr_observer.pv_intent_variant_runtime import PvIntentVariantRuntimeMixin
+from gr_observer.pv_linear_flow import PvLinearRuntimeMixin
 
 
 class VariantRuntimeSafetyTests(unittest.TestCase):
@@ -35,6 +40,62 @@ class VariantRuntimeSafetyTests(unittest.TestCase):
         source = inspect.getsource(PvIntentVariantRuntimeMixin)
         for token in ("TelegramClient(", "SafeOutboxWriter(", "OutboxWriter(", "create_task("):
             self.assertNotIn(token, source)
+
+    def test_production_composes_variant_runtime_after_linear_owner(self):
+        mro = PvReplyProduction.__mro__
+        self.assertIn(PvLinearRuntimeMixin, mro)
+        self.assertIn(PvIntentVariantRuntimeMixin, mro)
+        self.assertLess(mro.index(PvLinearRuntimeMixin), mro.index(PvIntentVariantRuntimeMixin))
+
+
+class _CanonicalSendBase:
+    def __init__(self, *args, **kwargs):
+        self.canonical_send = AsyncMock(return_value={"sent": True, "message_id": 77})
+
+    async def _send_row(self, *, effects, peer, row, origin_key, variables):
+        return await self.canonical_send(
+            effects=effects,
+            peer=peer,
+            row=row,
+            origin_key=origin_key,
+            variables=variables,
+        )
+
+
+class _VariantProbe(PvIntentVariantRuntimeMixin, _CanonicalSendBase):
+    pass
+
+
+class VariantFlagOffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flag_off_is_exact_passthrough_and_never_selects_variant(self):
+        probe = _VariantProbe(NS(pool=NS()), NS())
+        probe._intent_variant_store_ready = True
+        probe.intent_variant_store.select_for_action = AsyncMock(
+            side_effect=AssertionError("variant selector must stay inert with flag OFF")
+        )
+        row = {"id": 10, "content": "fala canonica"}
+        variables = {"_membership_repertoires": ["pre_join"]}
+        effects = object()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PV_LINEAR_FLOW_ENABLED", None)
+            result = await probe._send_row(
+                effects=effects,
+                peer=42,
+                row=row,
+                origin_key="pv_reply:linear:42:1:10",
+                variables=variables,
+            )
+
+        self.assertEqual(result, {"sent": True, "message_id": 77})
+        probe.intent_variant_store.select_for_action.assert_not_awaited()
+        probe.canonical_send.assert_awaited_once_with(
+            effects=effects,
+            peer=42,
+            row=row,
+            origin_key="pv_reply:linear:42:1:10",
+            variables=variables,
+        )
 
 
 if __name__ == "__main__":
