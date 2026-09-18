@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from telethon import types, utils
+from telethon.errors import UserNotParticipantError
 
 
 DDL = """
@@ -233,6 +234,79 @@ class GroupMembershipTracker:
                 int(chat_id),
             )
         )
+
+    async def _preview_chat_id(self) -> int | None:
+        """Resolve the configured preview chat without touching Telegram."""
+        if not _clean_link(self.preview_link):
+            return None
+        value = await self.pool.fetchval(
+            """SELECT target_chat_id FROM link_targets
+               WHERE disposition='active'
+                 AND target_chat_id IS NOT NULL
+                 AND RTRIM(url,'/')=RTRIM($1,'/')
+               LIMIT 1""",
+            self.preview_link,
+        )
+        return int(value) if value is not None else None
+
+    async def reconcile_current(self, client, user_id: int) -> str:
+        """Fill a missing preview state with one read-only Telegram membership check."""
+        await self.ensure_schema()
+        chat_id = await self._preview_chat_id()
+        if chat_id is None:
+            return "unresolved"
+
+        existing = await self.pool.fetchrow(
+            """SELECT status,preview_group FROM pv_group_membership_state
+               WHERE chat_id=$1 AND user_id=$2""",
+            int(chat_id),
+            int(user_id),
+        )
+        if existing is not None:
+            if not bool(existing["preview_group"]):
+                await self.pool.execute(
+                    """UPDATE pv_group_membership_state
+                       SET preview_group=TRUE,updated_at=NOW()
+                       WHERE chat_id=$1 AND user_id=$2""",
+                    int(chat_id),
+                    int(user_id),
+                )
+            return str(existing["status"])
+
+        try:
+            permissions = await client.get_permissions(int(chat_id), int(user_id))
+        except UserNotParticipantError:
+            status = "left"
+        else:
+            if permissions is None:
+                return "unresolved"
+            status = "left" if bool(getattr(permissions, "has_left", False)) else "joined"
+
+        observed_at = datetime.now(timezone.utc)
+        recorded = await self.pool.fetchval(
+            """INSERT INTO pv_group_membership_state(
+                 chat_id,user_id,status,first_joined_at,last_joined_at,last_left_at,
+                 last_change_at,join_count,leave_count,last_reason,preview_group,
+                 last_telegram_order,updated_at)
+               VALUES(
+                 $1,$2,$3,
+                 CASE WHEN $3='joined' THEN $4 ELSE NULL END,
+                 CASE WHEN $3='joined' THEN $4 ELSE NULL END,
+                 CASE WHEN $3='left' THEN $4 ELSE NULL END,
+                 $4,
+                 CASE WHEN $3='joined' THEN 1 ELSE 0 END,
+                 CASE WHEN $3='left' THEN 1 ELSE 0 END,
+                 'current_membership_reconcile',TRUE,NULL,NOW()
+               )
+               ON CONFLICT(chat_id,user_id) DO UPDATE SET
+                 preview_group=TRUE,updated_at=NOW()
+               RETURNING status""",
+            int(chat_id),
+            int(user_id),
+            status,
+            observed_at,
+        )
+        return str(recorded or status)
 
     async def observe(self, update) -> str:
         """Persist one raw membership update; never enqueue or send anything."""
