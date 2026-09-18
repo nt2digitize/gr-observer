@@ -28,7 +28,7 @@ class RequiredDestinationRepairTests(unittest.IsolatedAsyncioTestCase):
         restored = await module._restore_missing_required_destinations()
 
         self.assertEqual(restored, ("link.preview", "weekly.link2"))
-        self.assertEqual(len(pool.calls), 6)
+        self.assertEqual(len(pool.calls), 5)
         for sql, _args in pool.calls:
             self.assertIn("ON CONFLICT(step_key) DO NOTHING", sql)
             self.assertNotIn("UPDATE pv_message_steps", sql)
@@ -43,7 +43,7 @@ class RequiredDestinationRepairTests(unittest.IsolatedAsyncioTestCase):
         rows = {args[0]: args for _sql, args in pool.calls}
         self.assertEqual(rows["link.preview"][4], "{preview_link}")
         self.assertEqual(rows["followup.link"][4], "{preview_link}")
-        self.assertEqual(rows["reminder.link"][4], "{preview_link}")
+        self.assertNotIn("reminder.link", rows)
         self.assertEqual(rows["weekly.link1"][4], "{preview_link}")
         self.assertEqual(rows["weekly.link2"][4], "{preview_link}")
         self.assertEqual(rows["live.link"][2], POSITION_GAP * 2)
