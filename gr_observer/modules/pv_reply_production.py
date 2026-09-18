@@ -319,8 +319,7 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
         origin_key: str,
         variables: dict,
     ) -> dict:
-        """Attach passive membership context without changing linear progression."""
-        membership_context = None
+        """Attach passive membership context without changing delivery contracts."""
         linear_send = linear_flow_enabled() and str(origin_key).startswith("pv_reply:linear:")
         if linear_send:
             try:
@@ -371,14 +370,7 @@ class PvReplyProduction(PvLinearRuntimeMixin, PvReplyWithContacts):
             text=text,
             effect_key=effect_key,
         )
-        sent = {"sent": True, "step_id": int(row["id"]), **result}
-        if membership_context is None:
-            return sent
-        return {
-            **sent,
-            "membership_state": membership_context.state,
-            "membership_repertoires": list(membership_context.allowed_repertoires),
-        }
+        return {"sent": True, "step_id": int(row["id"]), **result}
 
     async def _restore_missing_required_destinations(self) -> tuple[str, ...]:
         """Restore only required rows physically deleted by old editor behavior."""
