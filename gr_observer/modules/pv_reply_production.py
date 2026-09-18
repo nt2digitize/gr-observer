@@ -19,6 +19,7 @@ from ..pv_linear_capability_runtime import PvLinearCapabilityRuntimeMixin
 from ..pv_linear_flow import PvLinearRuntimeMixin, linear_flow_enabled
 from ..pv_intent_variant_runtime import PvIntentVariantRuntimeMixin
 from ..pv_membership_context import membership_conversation_context
+from ..pv_membership_reconcile import reconcile_preview_membership
 from ..pv_message_steps import POSITION_GAP
 from ..pv_response_memory import PvResponseMemoryShadow
 from ..pv_suppression import suppress_pv_user
@@ -39,6 +40,7 @@ class PvReplyProduction(
 
     _LOCK_STRIPES = 256
     _NATIVE_BLOCK_RECONCILE_LIMIT = 100
+    _MEMBERSHIP_RECONCILE_COOLDOWN_SECONDS = 60.0
 
     def __init__(self, storage, settings):
         super().__init__(storage, settings)
@@ -50,6 +52,7 @@ class PvReplyProduction(
         )
         self._membership_tracker_ready = False
         self._membership_handler = None
+        self._membership_reconcile_at: dict[int, float] = {}
         self.temperature_shadow = PvTemperatureShadow(storage.pool)
         self._temperature_shadow_ready = False
         self.response_memory_shadow = PvResponseMemoryShadow(
@@ -139,6 +142,7 @@ class PvReplyProduction(
             self.client.remove_event_handler(self._membership_handler)
         self._membership_handler = None
         self._membership_tracker_ready = False
+        self._membership_reconcile_at.clear()
         if self.client is not None and self._native_block_handler is not None:
             self.client.remove_event_handler(self._native_block_handler)
         self._native_block_handler = None
@@ -160,6 +164,50 @@ class PvReplyProduction(
             return
         if outcome in {"joined", "left"}:
             log.info("PV membership shadow registrou mudança=%s", outcome)
+
+    async def _reconcile_membership_before_pv(self, event) -> None:
+        """Refresh current preview membership before linear PV can queue a reply."""
+        if not linear_flow_enabled() or not self._membership_tracker_ready:
+            return
+        if self.client is None:
+            return
+
+        sender = await event.get_sender()
+        if not is_human_sender(sender):
+            return
+        peer = int(sender.id)
+        if self.me is not None and peer == int(self.me.id):
+            return
+
+        now = asyncio.get_running_loop().time()
+        previous = self._membership_reconcile_at.get(peer)
+        if previous is not None and (
+            now - previous < self._MEMBERSHIP_RECONCILE_COOLDOWN_SECONDS
+        ):
+            return
+        self._membership_reconcile_at[peer] = now
+
+        try:
+            outcome = await reconcile_preview_membership(
+                self.storage.pool,
+                self.client,
+                preview_link=getattr(self.settings, "pv_preview_link", ""),
+                user_id=peer,
+                user_entity=sender,
+            )
+        except Exception as exc:
+            log.warning(
+                "PV membership current-state reconcile skipped peer=%s erro=%s",
+                peer,
+                type(exc).__name__,
+            )
+            return
+
+        log.info(
+            "PV membership current-state reconcile peer=%s outcome=%s",
+            peer,
+            outcome,
+        )
 
     async def _on_native_block_update(self, update) -> None:
         """Mirror a Telegram main-blocklist event into the internal PV kill switch."""
@@ -298,6 +346,7 @@ class PvReplyProduction(
             async with lock:
                 if await self._linear_opt_out(event):
                     return False
+                await self._reconcile_membership_before_pv(event)
                 result = await super().handle_event(event)
                 await self._observe_temperature_shadow(event)
                 await self._observe_response_memory_shadow(event)
