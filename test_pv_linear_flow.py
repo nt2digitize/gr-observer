@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from gr_observer.modules.pv_reply_production import PvReplyProduction
+from gr_observer.pv_linear_capability_runtime import PvLinearCapabilityRuntimeMixin
 from gr_observer.pv_linear_flow import (
     BLOCK_TO_PHASE,
     LINEAR_SCHEMA,
@@ -38,6 +39,11 @@ class PvLinearArchitectureTests(unittest.TestCase):
 
     def test_production_composes_linear_engine_statically(self):
         self.assertIn(PvLinearRuntimeMixin, PvReplyProduction.__mro__)
+        self.assertIn(PvLinearCapabilityRuntimeMixin, PvReplyProduction.__mro__)
+        self.assertLess(
+            PvReplyProduction.__mro__.index(PvLinearCapabilityRuntimeMixin),
+            PvReplyProduction.__mro__.index(PvLinearRuntimeMixin),
+        )
 
     def test_engine_adds_no_second_client_writer_or_background_worker(self):
         source = inspect.getsource(PvLinearRuntimeMixin)
@@ -74,25 +80,31 @@ class PvLinearArchitectureTests(unittest.TestCase):
             self.assertTrue(linear_flow_enabled())
 
     def test_flag_off_keeps_legacy_delegation_paths(self):
-        delegations = {
+        # Core linear ownership still keeps its explicit OFF fallback in production.
+        for method_name, delegation in {
             "_run_block": "return await super()._run_block(*args, **kwargs)",
-            "action_auto_queue_two_screens_photo": (
-                "return await super().action_auto_queue_two_screens_photo(action, effects)"
-            ),
-            "action_send_two_screens_photo": (
-                "return await super().action_send_two_screens_photo(action, effects)"
-            ),
-            "action_close_live_recipient": (
-                "return await super().action_close_live_recipient(action, effects)"
-            ),
             "action_send_message_step": (
                 "return await super().action_send_message_step(action, effects)"
             ),
-        }
-        for method_name, delegation in delegations.items():
+        }.items():
             source = inspect.getsource(getattr(PvReplyProduction, method_name))
             self.assertIn("linear_flow_enabled()", source, method_name)
             self.assertIn(delegation, source, method_name)
+
+        # Capability wrappers are intentionally pure delegates in production; the
+        # capability layer itself owns the flag boundary and exact legacy fallback.
+        for method_name in (
+            "action_auto_queue_two_screens_photo",
+            "action_send_two_screens_photo",
+            "action_close_live_recipient",
+        ):
+            production_source = inspect.getsource(getattr(PvReplyProduction, method_name))
+            self.assertIn(f"return await super().{method_name}(action, effects)", production_source)
+            capability_source = inspect.getsource(
+                getattr(PvLinearCapabilityRuntimeMixin, method_name)
+            )
+            self.assertIn("linear_flow_enabled()", capability_source, method_name)
+            self.assertIn(f"return await super().{method_name}(action, effects)", capability_source)
 
         opt_out = inspect.getsource(PvReplyProduction._linear_opt_out)
         self.assertIn("if not linear_flow_enabled()", opt_out)

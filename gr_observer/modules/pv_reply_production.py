@@ -15,6 +15,7 @@ from telethon.tl.functions.contacts import GetBlockedRequest
 from ..group_membership_tracker import GroupMembershipTracker
 from ..human_timing import MIN_WRITING_DELAY_SECONDS
 from ..pv_balloon_sender import has_media, send_media_balloon
+from ..pv_linear_capability_runtime import PvLinearCapabilityRuntimeMixin
 from ..pv_linear_flow import PvLinearRuntimeMixin, linear_flow_enabled
 from ..pv_intent_variant_runtime import PvIntentVariantRuntimeMixin
 from ..pv_membership_context import membership_conversation_context
@@ -29,6 +30,7 @@ log = logging.getLogger("gr-observer.pv-production")
 
 
 class PvReplyProduction(
+    PvLinearCapabilityRuntimeMixin,
     PvLinearRuntimeMixin,
     PvIntentVariantRuntimeMixin,
     PvReplyWithContacts,
@@ -63,18 +65,12 @@ class PvReplyProduction(
         return await super()._run_block(*args, **kwargs)
 
     async def action_auto_queue_two_screens_photo(self, action: dict, effects) -> dict:
-        if linear_flow_enabled():
-            return {"sent": False, "reason": "legacy_flow_disabled"}
         return await super().action_auto_queue_two_screens_photo(action, effects)
 
     async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
-        if linear_flow_enabled():
-            return {"sent": False, "reason": "legacy_flow_disabled"}
         return await super().action_send_two_screens_photo(action, effects)
 
     async def action_close_live_recipient(self, action: dict, effects) -> dict:
-        if linear_flow_enabled():
-            return {"sent": False, "reason": "legacy_flow_disabled"}
         return await super().action_close_live_recipient(action, effects)
 
     async def on_connect(self, client, me) -> None:
@@ -124,8 +120,6 @@ class PvReplyProduction(
         try:
             reconciled = await self._reconcile_native_blocklist(client, int(me.id))
         except Exception as exc:
-            # The real-time listener remains active even when this one bounded
-            # startup read fails. Never pause the USER runtime for this helper.
             log.warning(
                 "PV native block reconciliation skipped erro=%s",
                 type(exc).__name__,
@@ -226,7 +220,6 @@ class PvReplyProduction(
                 demand_signal=classify_demand_signal(event.raw_text or ""),
             )
         except Exception as exc:
-            # Shadow diagnostics must never interfere with PV business flow.
             log.warning("PV temperature shadow skipped erro=%s", type(exc).__name__)
             return
         if decision is not None and (decision.vacuum_candidate or decision.band in {"hot", "warm"}):
@@ -273,8 +266,6 @@ class PvReplyProduction(
                 text=event.raw_text or "",
             )
         except Exception as exc:
-            # Learning is strictly best-effort. Any uncertainty means no learning,
-            # never a pause, send, retry or change to the established PV journey.
             log.warning("PV MiniLearn shadow skipped erro=%s", type(exc).__name__)
 
     async def _linear_opt_out(self, event) -> bool:
@@ -384,7 +375,6 @@ class PvReplyProduction(
             ("followup.link", "followup", POSITION_GAP * 2, "Link do follow-up", "{preview_link}", 3),
             ("weekly.link1", "weekly", POSITION_GAP * 2, "Link semanal 1", "{preview_link}", 7),
             ("weekly.link2", "weekly", POSITION_GAP * 4, "Link semanal 2", "{preview_link}", 3),
-            # Destination-pair migration owns position 1; the actual destination is position 2.
             ("live.link", "live_link", POSITION_GAP * 2, "Destino", "{live_link}", MIN_WRITING_DELAY_SECONDS),
         )
         restored: list[str] = []
