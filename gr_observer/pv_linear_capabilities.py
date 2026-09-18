@@ -102,6 +102,20 @@ class PvLinearCapabilityStore:
             int(user_id),
         )
 
+    async def waiting_capabilities(self):
+        """Rows that may need restart reconciliation after the USER runtime reconnects."""
+        await self.ensure_ready()
+        return await self.pool.fetch(
+            """SELECT s.user_id,s.status,s.current_step_id,s.current_position,
+                      s.generation,m.step_key
+               FROM pv_linear_sessions s
+               JOIN pv_message_steps m ON m.id=s.current_step_id
+               WHERE s.status='waiting_reply'
+                 AND m.step_key IN ($1,$2)""",
+            TWO_SCREENS_CHOICE_STEP_KEY,
+            LIVE_OPTIN_STEP_KEY,
+        )
+
     async def waiting_on(self, user_id: int, step_key: str) -> bool:
         row = await self.waiting_step(user_id)
         return bool(
@@ -139,9 +153,40 @@ class PvLinearCapabilityStore:
                     return "ready"
                 if status in {"completed", "stopped"}:
                     return "already_done"
-                # Never steal a partially-running legacy session at cutover. Skipping
-                # it is safer than duplicating media or reopening an old choice.
+                # Never steal a partially-running legacy session during cutover.
                 return "legacy_active"
+
+    async def two_screens_status(self, user_id: int) -> str | None:
+        value = await self.pool.fetchval(
+            "SELECT status FROM pv_two_screens_sessions WHERE user_id=$1",
+            int(user_id),
+        )
+        return str(value) if value is not None else None
+
+    async def ensure_two_screens_fallback(
+        self,
+        user_id: int,
+        *,
+        action_key: str,
+        delay_seconds: int,
+    ) -> bool:
+        """Repair a missing fallback after restart without reopening the choice state."""
+        inserted = await self.pool.fetchval(
+            """INSERT INTO outbox_actions(
+                 action_key,module_id,action_type,payload,available_at)
+               SELECT $2,'pv_reply','auto_queue_two_screens_photo',$3::jsonb,
+                      NOW()+($4::double precision*INTERVAL '1 second')
+               WHERE EXISTS(
+                 SELECT 1 FROM pv_two_screens_sessions
+                 WHERE user_id=$1 AND status='awaiting_choice'
+               )
+               ON CONFLICT(action_key) DO NOTHING RETURNING id""",
+            int(user_id),
+            str(action_key),
+            _json({"peer": int(user_id)}),
+            max(0, int(delay_seconds)),
+        )
+        return inserted is not None
 
     async def complete_two_screens(self, user_id: int) -> None:
         await self.pool.execute(
@@ -150,6 +195,13 @@ class PvLinearCapabilityStore:
                WHERE user_id=$1 AND status NOT IN ('completed','stopped')""",
             int(user_id),
         )
+
+    async def live_subscription_status(self, user_id: int) -> str | None:
+        value = await self.pool.fetchval(
+            "SELECT status FROM live_alert_subscriptions WHERE user_id=$1",
+            int(user_id),
+        )
+        return str(value) if value is not None else None
 
     async def handle_live_optin_response(self, user_id: int, response_kind: str) -> str:
         """Resolve only the pending subscription question; never advance the line."""
