@@ -1,4 +1,4 @@
-"""Passive group-membership tracker for known PV leads.
+"""Passive group-membership tracker for PV leads and preview members.
 
 Consumes Telegram membership updates and persists only the operational facts
 needed by the PV journey. It never creates Outbox actions or mutates Telegram.
@@ -195,7 +195,7 @@ def membership_change_from_update(
 
 
 class GroupMembershipTracker:
-    """Shadow-only persistence of join/leave facts for already-known leads."""
+    """Persist join/leave facts for known leads and the configured preview group."""
 
     def __init__(self, pool, *, preview_link: str = "") -> None:
         self.pool = pool
@@ -240,11 +240,11 @@ class GroupMembershipTracker:
         if change is None:
             return "ignored"
         await self.ensure_schema()
-        if not await self._known_lead(change.user_id):
-            return "ignored_unknown_lead"
         preview_group = change.preview_link_match or await self._known_preview_chat(
             change.chat_id
         )
+        if not preview_group and not await self._known_lead(change.user_id):
+            return "ignored_unknown_lead"
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
