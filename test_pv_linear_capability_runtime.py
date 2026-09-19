@@ -51,8 +51,12 @@ class LinearCapabilityRuntimeContractTests(unittest.TestCase):
     def test_restart_reconciles_choice_fallback_and_live_optin(self):
         source = inspect.getsource(PvLinearCapabilityRuntimeMixin._reconcile_linear_capabilities)
         self.assertIn("waiting_capabilities", source)
+        self.assertIn("linear_flow_enabled(peer)", source)
         self.assertIn("_open_or_repair_two_screens_wait", source)
         self.assertIn("mark_live_optin_asked", source)
+        connect = inspect.getsource(PvLinearCapabilityRuntimeMixin.on_connect)
+        self.assertIn("_reconcile_linear_capabilities", connect)
+        self.assertNotIn("if linear_flow_enabled():", connect)
         repair = inspect.getsource(PvLinearCapabilityRuntimeMixin._open_or_repair_two_screens_wait)
         self.assertIn("ensure_two_screens_fallback", repair)
         self.assertIn("photo_queued", repair)
@@ -72,7 +76,7 @@ class LinearCapabilityRuntimeContractTests(unittest.TestCase):
             "action_close_live_recipient",
         ):
             source = inspect.getsource(getattr(PvLinearCapabilityRuntimeMixin, name))
-            self.assertIn("linear_flow_enabled()", source)
+            self.assertIn("linear_flow_enabled(peer)", source)
             self.assertIn(f"PvReplyModule.{name}", source)
             self.assertIn(f"return await super().{name}(action, effects)", source)
         self.assertTrue(hasattr(PvReplyModule, "action_send_live_link"))
@@ -88,8 +92,14 @@ class LinearCapabilityRuntimeContractTests(unittest.TestCase):
             "action_close_live_recipient",
         ):
             source = inspect.getsource(getattr(PvLinearCapabilityRuntimeMixin, name))
-            self.assertIn("linear_flow_enabled()", source, name)
+            self.assertIn("linear_flow_enabled(peer)", source, name)
             self.assertIn("return await super().", source, name)
+
+    def test_event_and_linear_balloon_use_explicit_peer_scope(self):
+        event_source = inspect.getsource(PvLinearCapabilityRuntimeMixin.handle_event)
+        balloon_source = inspect.getsource(PvLinearCapabilityRuntimeMixin.action_send_linear_balloon)
+        self.assertIn("linear_flow_enabled(peer)", event_source)
+        self.assertIn("linear_flow_enabled(peer)", balloon_source)
 
 
 if __name__ == "__main__":
