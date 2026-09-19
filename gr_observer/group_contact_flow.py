@@ -233,7 +233,7 @@ class GroupContactFlow:
             await self.contacts.mark_already_saved(user_id)
 
         account_id = int(getattr(self.me, "id", 0) or 0)
-        delay = _stable_delay(f"group-add:{chat_id}:{event.id}:{user_id}")
+        delay = 0
         await self.pool.execute(
             """INSERT INTO outbox_actions(
                    action_key,module_id,action_type,payload,available_at
