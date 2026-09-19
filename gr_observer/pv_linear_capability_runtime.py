@@ -164,9 +164,11 @@ class PvLinearCapabilityRuntimeMixin:
         return session
 
     async def action_send_linear_balloon(self, action: dict, effects) -> dict:
+        if not linear_flow_enabled() or not self._linear_capability_ready:
+            return await super().action_send_linear_balloon(action, effects)
         payload = action.get("payload") or {}
         peer = int(payload.get("peer") or 0)
-        if not linear_flow_enabled(peer) or not self._linear_capability_ready:
+        if not linear_flow_enabled(peer):
             return await super().action_send_linear_balloon(action, effects)
         step_id = int(payload.get("step_id") or 0)
         generation = int(payload.get("generation") or 0)
@@ -207,6 +209,10 @@ class PvLinearCapabilityRuntimeMixin:
         return result
 
     async def handle_event(self, event) -> bool:
+        # Preserve exact flag-off passthrough: when the linear feature is off,
+        # this layer must not inspect sender details or affect legacy behavior.
+        if not linear_flow_enabled() or not self._linear_capability_ready:
+            return await super().handle_event(event)
         if not event.is_private or event.out or not event.sender_id:
             return await super().handle_event(event)
         sender = await event.get_sender()
@@ -215,7 +221,7 @@ class PvLinearCapabilityRuntimeMixin:
         peer = int(sender.id)
         if self.me is not None and peer == int(self.me.id):
             return False
-        if not linear_flow_enabled(peer) or not self._linear_capability_ready:
+        if not linear_flow_enabled(peer):
             return await super().handle_event(event)
 
         waiting = await self.linear_capability_store.waiting_step(peer)
@@ -271,8 +277,10 @@ class PvLinearCapabilityRuntimeMixin:
         return await super().handle_event(event)
 
     async def action_auto_queue_two_screens_photo(self, action: dict, effects) -> dict:
+        if not linear_flow_enabled() or not self._linear_capability_ready:
+            return await super().action_auto_queue_two_screens_photo(action, effects)
         peer = int((action.get("payload") or {}).get("peer") or 0)
-        if not linear_flow_enabled(peer) or not self._linear_capability_ready:
+        if not linear_flow_enabled(peer):
             return await super().action_auto_queue_two_screens_photo(action, effects)
         if not await self.linear_capability_store.waiting_on(peer, TWO_SCREENS_CHOICE_STEP_KEY):
             return {"queued": False, "reason": "linear_capability_not_waiting"}
@@ -287,8 +295,10 @@ class PvLinearCapabilityRuntimeMixin:
         return {"queued": outcome == "photo_queued", "outcome": outcome}
 
     async def action_send_two_screens_photo(self, action: dict, effects) -> dict:
+        if not linear_flow_enabled() or not self._linear_capability_ready:
+            return await super().action_send_two_screens_photo(action, effects)
         peer = int((action.get("payload") or {}).get("peer") or 0)
-        if not linear_flow_enabled(peer) or not self._linear_capability_ready:
+        if not linear_flow_enabled(peer):
             return await super().action_send_two_screens_photo(action, effects)
         if not await self.linear_capability_store.waiting_on(peer, TWO_SCREENS_CHOICE_STEP_KEY):
             return {"sent": False, "reason": "linear_capability_not_waiting"}
@@ -309,31 +319,36 @@ class PvLinearCapabilityRuntimeMixin:
         return result
 
     async def action_send_live_optin(self, action: dict, effects) -> dict:
-        peer = int((action.get("payload") or {}).get("peer") or 0)
-        if linear_flow_enabled(peer):
-            return {"sent": False, "reason": "linear_capability_owned"}
+        if linear_flow_enabled():
+            peer = int((action.get("payload") or {}).get("peer") or 0)
+            if linear_flow_enabled(peer):
+                return {"sent": False, "reason": "linear_capability_owned"}
         return await super().action_send_live_optin(action, effects)
 
     async def action_send_live_invite(self, action: dict, effects) -> dict:
-        peer = int((action.get("payload") or {}).get("peer") or 0)
-        if linear_flow_enabled(peer):
-            return await PvReplyModule.action_send_live_invite(self, action, effects)
+        if linear_flow_enabled():
+            peer = int((action.get("payload") or {}).get("peer") or 0)
+            if linear_flow_enabled(peer):
+                return await PvReplyModule.action_send_live_invite(self, action, effects)
         return await super().action_send_live_invite(action, effects)
 
     async def action_send_live_remarketing(self, action: dict, effects) -> dict:
-        peer = int((action.get("payload") or {}).get("peer") or 0)
-        if linear_flow_enabled(peer):
-            return await PvReplyModule.action_send_live_remarketing(self, action, effects)
+        if linear_flow_enabled():
+            peer = int((action.get("payload") or {}).get("peer") or 0)
+            if linear_flow_enabled(peer):
+                return await PvReplyModule.action_send_live_remarketing(self, action, effects)
         return await super().action_send_live_remarketing(action, effects)
 
     async def action_send_live_link(self, action: dict, effects) -> dict:
-        peer = int((action.get("payload") or {}).get("peer") or 0)
-        if linear_flow_enabled(peer):
-            return await PvReplyModule.action_send_live_link(self, action, effects)
+        if linear_flow_enabled():
+            peer = int((action.get("payload") or {}).get("peer") or 0)
+            if linear_flow_enabled(peer):
+                return await PvReplyModule.action_send_live_link(self, action, effects)
         return await super().action_send_live_link(action, effects)
 
     async def action_close_live_recipient(self, action: dict, effects) -> dict:
-        peer = int((action.get("payload") or {}).get("peer") or 0)
-        if linear_flow_enabled(peer):
-            return await PvReplyModule.action_close_live_recipient(self, action, effects)
+        if linear_flow_enabled():
+            peer = int((action.get("payload") or {}).get("peer") or 0)
+            if linear_flow_enabled(peer):
+                return await PvReplyModule.action_close_live_recipient(self, action, effects)
         return await super().action_close_live_recipient(action, effects)
